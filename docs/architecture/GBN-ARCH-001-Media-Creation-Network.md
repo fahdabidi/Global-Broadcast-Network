@@ -137,9 +137,9 @@ Onion Wrapping (per relay hop):
 ```
   Circuit Mgr    BON DHT     Guard (R1)   Middle (R2)   Exit (R3)    Publisher
       │             │             │             │             │           │
-      │──Query ────▶│             │             │             │           │
-      │  avail relays│             │             │             │           │
-      │◀──relay list─┤             │             │             │           │
+      │   (Passive Background Sync preventing Query Correlation)      │
+      │──Bulk download DHT buckets──────────────────────────────▶│
+      │◀──Relay Descriptors ─────────────────────────────────────┤
       │              │             │             │             │           │
       ├─ Select guard from trusted pool          │             │           │
       ├─ Select middle by reputation             │             │           │

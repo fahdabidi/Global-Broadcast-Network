@@ -71,3 +71,34 @@ The Publisher node is a high-value target. It cannot protect against the followi
 * **Description:** A Publisher intentionally or negligently publishes illegal content (e.g., CSAM, or content violating local laws), inviting extreme legal scrutiny.
 * **Why it succeeds:** The GBN is a neutral protocol. The Publisher holds total editorial power. If they publish illegal content, they open themselves (and potentially downstream Content Providers) to criminal liability. 
 * **Status:** Unmitigated on the technical layer. The system architecture specifically places *editorial and legal responsibility* on the Publisher, creating a liability firewall protecting the rest of the network relays.
+
+### 5.4 Social Engineering & Out-of-Band Key Deception
+* **Description:** A state actor distributes a visually identical clone of the GBN app via a honeypot Telegram group, or hacks a journalist's social media and posts a "Fake" QR Code containing a State-controlled Public Key.
+* **Why it succeeds:** Cryptography relies on "Trust on First Use" (TOFU). If the human Creator is tricked into loading the adversary's Public Key into their clean app, the MCN will flawlessly encrypt the video... locked so only the adversary can open it.
+* **Status:** Structurally unmitigated. Cryptography cannot fix human deception prior to the math executing. Mitigated only via external UI/UX (e.g., "Publisher Fingerprints" — generating a 4-word dictionary string from the key that the Creator verifies verbally with the journalist over a secure phone call).
+
+---
+
+## 6. Route Discovery & Cryptographic Trust Validation
+
+To anonymously route media from the Creator to the Publisher, the network employs a zero-trust pathfinding mechanism preventing Sybil, Blackhole, and Identity Spoofing attacks.
+
+### 6.1 The Root of Trust
+Publishers are identified solely by their Ed25519 Public Key. The Creator obtains this key out-of-band (e.g., scanning a QR code from a trusted publisher). This Public Key serves as the absolute Root of Trust for both Publisher identity and video encryption.
+
+### 6.2 The Distributed Relay Directory (DHT)
+Instead of central directory servers, the network utilizes a Kademlia DHT. 
+* **Relay Descriptors:** Volunteer nodes publish their `NodeID`, IP address, and available transports. Creators act exclusively as read-only "ghosts" and **never** publish their IPs to the DHT. 
+* **Passive Syncing:** To prevent "Query Correlation" (an adversary seeing a Creator query for a route and linking it to a payload), the Creator's app downloads DHT buckets continuously in the background, selecting routes strictly from a local cached network map.
+* **Pre-Flight Reachability Check:** Before a node is permitted to advertise itself to the DHT, it must physically establish encrypted connections to multiple international endpoints. If it is trapped behind a national firewall, it silently fails the check, preventing "Domestic Blackholes" from cluttering the directory.
+
+### 6.3 Anti-Spoofing the Publisher
+The Publisher publishes their listening network address to the DHT under `hash(Publisher_PublicKey)`. To prevent an adversary from overwriting this entry with their own IP address, the descriptor must include a valid cryptographic signature. Since the adversary lacks the Publisher's Private Key, they cannot spoof the announcement.
+
+### 6.4 Telescopic Onion Routing (Anti-Sinkhole)
+When building the path (`Guard -> Middle -> Exit -> Publisher`), the Creator relies on mathematical validation:
+1. The Creator does a base `Noise_XX` handshake with the Guard.
+2. The Creator extends to the Middle by wrapping a new `Noise_XX` handshake in the Guard's encryption layer. The Guard passes it to the Middle node.
+3. The Middle node calculates a cryptographic response and passes it back. 
+
+By successfully validating the Middle node's cryptographic reply, the Creator simultaneously proves the Middle node is authentic **and** that the Guard node honestly forwarded the packet. If the Guard attempts to blackhole the traffic and fake a success message, it fails because it lacks the Middle node's private key to execute the math. This strict cryptographic relay validation guarantees that no node can silently drop packets while pretending the circuit is alive.
