@@ -1,5 +1,6 @@
-use ed25519_dalek::{PublicKey, Signature, Verifier};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
 use std::net::SocketAddr;
 use thiserror::Error;
 
@@ -21,21 +22,24 @@ pub struct RelayDescriptor {
     /// The timestamp when this was published (prevent replay attacks).
     pub timestamp: u64,
     /// Signature of the (identity_key + address + timestamp) bytes.
+    #[serde(with = "BigArray")]
     pub signature: [u8; 64],
 }
 
 impl RelayDescriptor {
     /// Verify that the RelayDescriptor represents a cryptographically sound record.
     pub fn verify(&self) -> Result<(), DhtError> {
-        let pub_key = PublicKey::from_bytes(&self.identity_key)?;
-        let sig = Signature::from_bytes(&self.signature)?;
+        let public_key = VerifyingKey::from_bytes(&self.identity_key).map_err(DhtError::DalekError)?;
+        let sig = Signature::from_bytes(&self.signature);
 
         let mut signed_data = Vec::new();
         signed_data.extend_from_slice(&self.identity_key);
         signed_data.extend_from_slice(self.address.to_string().as_bytes());
         signed_data.extend_from_slice(&self.timestamp.to_le_bytes());
 
-        pub_key.verify(&signed_data, &sig)?;
+        public_key
+            .verify(&signed_data, &sig)
+            .map_err(|_| DhtError::InvalidSignature)?;
         Ok(())
     }
 }

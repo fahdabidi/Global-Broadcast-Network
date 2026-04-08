@@ -19,12 +19,13 @@ repository = "https://github.com/gbn-project/gbn-proto"
 [workspace.dependencies]
 # Cryptography
 x25519-dalek = { version = "2", features = ["static_secrets"] }
-ed25519-dalek = { version = "2", features = ["rand_core"] }
+ed25519-dalek = { version = "2", features = ["rand_core", "std"] }
 aes-gcm = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"
 blake3 = "1"
-zeroize = { version = "1", features = ["derive"] }
+ zeroize = { version = "1", features = ["derive"] }
+serde-big-array = "0.5"
 rand = "0.8"
 snow = "0.9"
 

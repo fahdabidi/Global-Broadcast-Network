@@ -24,7 +24,7 @@ use anyhow::{Context, Result};
 use gbn_protocol::onion::{
     DataPayload, ExtendPayload, ExtendedPayload, HeartbeatPayload, OnionCell,
 };
-use mcn_crypto::noise::{build_initiator, build_responder, decrypt_frame, encrypt_frame};
+use mcn_crypto::noise::{build_initiator, build_responder, complete_handshake, decrypt_frame, encrypt_frame};
 use snow::HandshakeState;
 use std::{net::SocketAddr, time::Duration};
 use tokio::{
@@ -58,49 +58,6 @@ pub async fn recv_cell(stream: &mut TcpStream) -> Result<OnionCell> {
 }
 
 // ─────────────────────────── Noise Handshake Helpers ──────────────────────
-
-/// Drive a `HandshakeState` to completion over a TCP stream.
-///
-/// Noise_XX requires 3 round-trips (→, ←, →). We alternate sending/receiving
-/// until `is_handshake_finished()` returns true.
-pub async fn complete_handshake(
-    stream: &mut TcpStream,
-    mut hs: HandshakeState,
-    initiator: bool,
-) -> Result<snow::TransportState> {
-    let mut buf = vec![0u8; 65535];
-    let mut msg = vec![0u8; 65535];
-
-    // Noise_XX pattern:  initiator sends first → responder replies → initiator sends final
-    let send_first = initiator;
-
-    loop {
-        if hs.is_handshake_finished() {
-            break;
-        }
-
-        if (send_first && hs.get_handshake_hash().len() % 2 == 0)
-            || (!send_first && hs.get_handshake_hash().len() % 2 != 0)
-        {
-            // Our turn to send
-            let len = hs.write_message(&[], &mut buf)?;
-            let payload = &buf[..len];
-            stream.write_all(&(payload.len() as u32).to_le_bytes()).await?;
-            stream.write_all(payload).await?;
-            stream.flush().await?;
-        } else {
-            // Our turn to receive
-            let mut len_buf = [0u8; 4];
-            stream.read_exact(&mut len_buf).await?;
-            let len = u32::from_le_bytes(len_buf) as usize;
-            let raw = &mut msg[..len];
-            stream.read_exact(raw).await?;
-            hs.read_message(raw, &mut buf)?;
-        }
-    }
-
-    Ok(hs.into_transport_mode()?)
-}
 
 // ─────────────────────────── Relay Engine ─────────────────────────────────
 

@@ -172,10 +172,6 @@ Resources:
       SecurityGroupIds:
         - !Ref SSHSecurityGroup
         - !Ref RelaySecurityGroup
-      InstanceMarketOptions:
-        MarketType: spot
-        SpotOptions:
-          SpotInstanceType: one-time
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
@@ -210,10 +206,6 @@ Resources:
       SecurityGroupIds:
         - !Ref SSHSecurityGroup
         - !Ref RelaySecurityGroup
-      InstanceMarketOptions:
-        MarketType: spot
-        SpotOptions:
-          SpotInstanceType: one-time
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
@@ -238,10 +230,6 @@ Resources:
       SecurityGroupIds:
         - !Ref SSHSecurityGroup
         - !Ref RelaySecurityGroup
-      InstanceMarketOptions:
-        MarketType: spot
-        SpotOptions:
-          SpotInstanceType: one-time
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
@@ -266,10 +254,6 @@ Resources:
       SecurityGroupIds:
         - !Ref SSHSecurityGroup
         - !Ref RelaySecurityGroup
-      InstanceMarketOptions:
-        MarketType: spot
-        SpotOptions:
-          SpotInstanceType: one-time
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
@@ -294,10 +278,6 @@ Resources:
       SecurityGroupIds:
         - !Ref SSHSecurityGroup
         - !Ref RelaySecurityGroup
-      InstanceMarketOptions:
-        MarketType: spot
-        SpotOptions:
-          SpotInstanceType: one-time
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
@@ -322,10 +302,6 @@ Resources:
       SecurityGroupIds:
         - !Ref SSHSecurityGroup
         - !Ref RelaySecurityGroup
-      InstanceMarketOptions:
-        MarketType: spot
-        SpotOptions:
-          SpotInstanceType: one-time
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
@@ -345,21 +321,21 @@ Outputs:
     Description: Public IP of the Creator instance
     Value: !GetAtt CreatorInstance.PublicIp
 
-  Relay1PrivateIP:
-    Description: Private IP of Relay 1 (Subnet A)
-    Value: !GetAtt RelayInstance1.PrivateIp
+  Relay1PublicIP:
+    Description: Public IP of Relay 1 (Subnet A)
+    Value: !GetAtt RelayInstance1.PublicIp
 
-  Relay2PrivateIP:
-    Description: Private IP of Relay 2 (Subnet B)
-    Value: !GetAtt RelayInstance2.PrivateIp
+  Relay2PublicIP:
+    Description: Public IP of Relay 2 (Subnet B)
+    Value: !GetAtt RelayInstance2.PublicIp
 
-  Relay3PrivateIP:
-    Description: Private IP of Relay 3 (Subnet B)
-    Value: !GetAtt RelayInstance3.PrivateIp
+  Relay3PublicIP:
+    Description: Public IP of Relay 3 (Subnet B)
+    Value: !GetAtt RelayInstance3.PublicIp
 
-  Relay4PrivateIP:
-    Description: Private IP of Relay 4 (Subnet C)
-    Value: !GetAtt RelayInstance4.PrivateIp
+  Relay4PublicIP:
+    Description: Public IP of Relay 4 (Subnet C)
+    Value: !GetAtt RelayInstance4.PublicIp
 
   PublisherPublicIP:
     Description: Public IP of the Publisher instance
@@ -371,4 +347,4 @@ Outputs:
 
   EstimatedCost:
     Description: Estimated hourly cost (Spot pricing varies)
-    Value: "~$0.50-$1.00/hr for 7 Spot instances. REMEMBER TO RUN teardown.sh WHEN DONE."
+    Value: "~$0.024/hr for 7 instances. REMEMBER TO RUN teardown.sh WHEN DONE."

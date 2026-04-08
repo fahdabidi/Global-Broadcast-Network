@@ -9,6 +9,7 @@ license.workspace = true
 serde = { workspace = true }
 blake3 = { workspace = true }
 ed25519-dalek = { workspace = true }
+serde-big-array = { workspace = true }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
 snow = { workspace = true }

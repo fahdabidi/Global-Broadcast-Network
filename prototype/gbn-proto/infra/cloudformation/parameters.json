@@ -1,24 +1,22 @@
-{
-  "Parameters": [
-    {
-      "ParameterKey": "KeyPairName",
-      "ParameterValue": "gbn-proto-key"
-    },
-    {
-      "ParameterKey": "DeployerIP",
-      "ParameterValue": "0.0.0.0/0"
-    },
-    {
-      "ParameterKey": "CreatorInstanceType",
-      "ParameterValue": "t3.small"
-    },
-    {
-      "ParameterKey": "RelayInstanceType",
-      "ParameterValue": "t3.micro"
-    },
-    {
-      "ParameterKey": "PublisherInstanceType",
-      "ParameterValue": "t3.small"
-    }
-  ]
-}
+[
+  {
+    "ParameterKey": "KeyPairName",
+    "ParameterValue": "gbn-proto-key"
+  },
+  {
+    "ParameterKey": "DeployerIP",
+    "ParameterValue": "73.158.194.57/32"
+  },
+  {
+    "ParameterKey": "CreatorInstanceType",
+    "ParameterValue": "t3.small"
+  },
+  {
+    "ParameterKey": "RelayInstanceType",
+    "ParameterValue": "t3.micro"
+  },
+  {
+    "ParameterKey": "PublisherInstanceType",
+    "ParameterValue": "t3.small"
+  }
+]
