@@ -28,9 +28,9 @@ This document tracks the step-by-step execution roadmap to upgrade the `gbn-prot
 - `[x]` Handle `RelayExtend` logic: if a router receives an extension request, it dials the next hop, completes the inner handshake, and links the connections in-memory.
 
 ## Step 5: Circuit Manager & Dynamic Fallback
-- `[ ]` Implement the Creator's `CircuitManager`. Ensure it establishes multi-hop nested handshakes (`Guard -> Middle -> Exit`).
-- `[ ]` Implement the continuous `Heartbeat` PING interval.
-- `[ ]` Write the Circuit Failure fallback: if a heartbeat times out, dynamically query the DHT for a new route and re-queue un-ACKed chunks to it.
+- `[x]` Implement the Creator's `CircuitManager`. Ensure it establishes multi-hop nested handshakes (`Guard -> Middle -> Exit`).
+- `[x]` Implement the continuous `Heartbeat` PING interval.
+- `[x]` Write the Circuit Failure fallback: if a heartbeat times out, dynamically query the DHT for a new route and re-queue un-ACKed chunks to it.
 
 ## Step 6: Local Security Integration Tests
 - `[ ]` Construct `S1.6`: Telescopic Sinkhole simulation (validate Guard is mathematically prevented from dropping middle packet).
