@@ -1,0 +1,374 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  GBN Phase 1 Prototype - Media Creation Network
+  Deploys Creator, Relay, and Publisher EC2 Spot instances across 3 AZs
+  for testing the anonymized video chunking and reassembly pipeline.
+
+Parameters:
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 key pair name for SSH access
+
+  DeployerIP:
+    Type: String
+    Description: Your public IP in CIDR notation (e.g. 203.0.113.50/32) for SSH access
+    AllowedPattern: '(\d{1,3}\.){3}\d{1,3}/\d{1,2}'
+
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+    Description: Amazon Linux 2023 latest AMI (auto-resolved via SSM)
+
+  CreatorInstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.micro, t3.small, t3.medium]
+    Description: Instance type for Creator node (needs CPU for encryption)
+
+  RelayInstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t3.micro, t3.small]
+    Description: Instance type for Relay nodes (lightweight forwarding)
+
+  PublisherInstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.micro, t3.small, t3.medium]
+    Description: Instance type for Publisher node (needs CPU for decryption + reassembly)
+
+Resources:
+  # ─────────────────────────── VPC & Networking ───────────────────────────
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: gbn-proto-phase1-vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: gbn-proto-phase1-igw
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: gbn-proto-phase1-rt
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: gbn-proto-subnet-a
+
+  SubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: gbn-proto-subnet-b
+
+  SubnetC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.3.0/24
+      AvailabilityZone: !Select [2, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: gbn-proto-subnet-c
+
+  SubnetARouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetA
+      RouteTableId: !Ref RouteTable
+
+  SubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetB
+      RouteTableId: !Ref RouteTable
+
+  SubnetCRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetC
+      RouteTableId: !Ref RouteTable
+
+  # ─────────────────────────── Security Groups ───────────────────────────
+
+  SSHSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSH from deployer IP only
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref DeployerIP
+      Tags:
+        - Key: Name
+          Value: gbn-proto-ssh-sg
+
+  RelaySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow inter-relay traffic on ports 9000-9100 within VPC
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 9000
+          ToPort: 9100
+          CidrIp: 10.0.0.0/16
+      Tags:
+        - Key: Name
+          Value: gbn-proto-relay-sg
+
+  # ─────────────────────────── EC2 Instances ───────────────────────────
+
+  CreatorInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref CreatorInstanceType
+      ImageId: !Ref AmiId
+      KeyName: !Ref KeyPairName
+      SubnetId: !Ref SubnetA
+      SecurityGroupIds:
+        - !Ref SSHSecurityGroup
+        - !Ref RelaySecurityGroup
+      InstanceMarketOptions:
+        MarketType: spot
+        SpotOptions:
+          SpotInstanceType: one-time
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          # Tag for identification
+          hostnamectl set-hostname gbn-creator
+          # Install dependencies
+          dnf install -y gcc make openssl-devel perl-FindBin perl-IPC-Cmd
+          # Install Rust
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          source /root/.cargo/env
+          # Install FFmpeg
+          dnf install -y ffmpeg || {
+            # Fallback: install from static build
+            curl -L -o /tmp/ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+            tar -xf /tmp/ffmpeg.tar.xz -C /usr/local/bin --strip-components=1 --wildcards '*/ffmpeg' '*/ffprobe'
+          }
+          echo "Bootstrap complete" > /tmp/bootstrap-done
+      Tags:
+        - Key: Name
+          Value: gbn-proto-creator
+        - Key: Role
+          Value: creator
+
+  RelayInstance1:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref RelayInstanceType
+      ImageId: !Ref AmiId
+      KeyName: !Ref KeyPairName
+      SubnetId: !Ref SubnetA
+      SecurityGroupIds:
+        - !Ref SSHSecurityGroup
+        - !Ref RelaySecurityGroup
+      InstanceMarketOptions:
+        MarketType: spot
+        SpotOptions:
+          SpotInstanceType: one-time
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          hostnamectl set-hostname gbn-relay-1
+          dnf install -y gcc make openssl-devel
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "Bootstrap complete" > /tmp/bootstrap-done
+      Tags:
+        - Key: Name
+          Value: gbn-proto-relay-1
+        - Key: Role
+          Value: relay
+
+  RelayInstance2:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref RelayInstanceType
+      ImageId: !Ref AmiId
+      KeyName: !Ref KeyPairName
+      SubnetId: !Ref SubnetB
+      SecurityGroupIds:
+        - !Ref SSHSecurityGroup
+        - !Ref RelaySecurityGroup
+      InstanceMarketOptions:
+        MarketType: spot
+        SpotOptions:
+          SpotInstanceType: one-time
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          hostnamectl set-hostname gbn-relay-2
+          dnf install -y gcc make openssl-devel
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "Bootstrap complete" > /tmp/bootstrap-done
+      Tags:
+        - Key: Name
+          Value: gbn-proto-relay-2
+        - Key: Role
+          Value: relay
+
+  RelayInstance3:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref RelayInstanceType
+      ImageId: !Ref AmiId
+      KeyName: !Ref KeyPairName
+      SubnetId: !Ref SubnetB
+      SecurityGroupIds:
+        - !Ref SSHSecurityGroup
+        - !Ref RelaySecurityGroup
+      InstanceMarketOptions:
+        MarketType: spot
+        SpotOptions:
+          SpotInstanceType: one-time
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          hostnamectl set-hostname gbn-relay-3
+          dnf install -y gcc make openssl-devel
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "Bootstrap complete" > /tmp/bootstrap-done
+      Tags:
+        - Key: Name
+          Value: gbn-proto-relay-3
+        - Key: Role
+          Value: relay
+
+  RelayInstance4:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref RelayInstanceType
+      ImageId: !Ref AmiId
+      KeyName: !Ref KeyPairName
+      SubnetId: !Ref SubnetC
+      SecurityGroupIds:
+        - !Ref SSHSecurityGroup
+        - !Ref RelaySecurityGroup
+      InstanceMarketOptions:
+        MarketType: spot
+        SpotOptions:
+          SpotInstanceType: one-time
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          hostnamectl set-hostname gbn-relay-4
+          dnf install -y gcc make openssl-devel
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "Bootstrap complete" > /tmp/bootstrap-done
+      Tags:
+        - Key: Name
+          Value: gbn-proto-relay-4
+        - Key: Role
+          Value: relay
+
+  PublisherInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref PublisherInstanceType
+      ImageId: !Ref AmiId
+      KeyName: !Ref KeyPairName
+      SubnetId: !Ref SubnetC
+      SecurityGroupIds:
+        - !Ref SSHSecurityGroup
+        - !Ref RelaySecurityGroup
+      InstanceMarketOptions:
+        MarketType: spot
+        SpotOptions:
+          SpotInstanceType: one-time
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          hostnamectl set-hostname gbn-publisher
+          dnf install -y gcc make openssl-devel
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "Bootstrap complete" > /tmp/bootstrap-done
+      Tags:
+        - Key: Name
+          Value: gbn-proto-publisher
+        - Key: Role
+          Value: publisher
+
+Outputs:
+  CreatorPublicIP:
+    Description: Public IP of the Creator instance
+    Value: !GetAtt CreatorInstance.PublicIp
+
+  Relay1PrivateIP:
+    Description: Private IP of Relay 1 (Subnet A)
+    Value: !GetAtt RelayInstance1.PrivateIp
+
+  Relay2PrivateIP:
+    Description: Private IP of Relay 2 (Subnet B)
+    Value: !GetAtt RelayInstance2.PrivateIp
+
+  Relay3PrivateIP:
+    Description: Private IP of Relay 3 (Subnet B)
+    Value: !GetAtt RelayInstance3.PrivateIp
+
+  Relay4PrivateIP:
+    Description: Private IP of Relay 4 (Subnet C)
+    Value: !GetAtt RelayInstance4.PrivateIp
+
+  PublisherPublicIP:
+    Description: Public IP of the Publisher instance
+    Value: !GetAtt PublisherInstance.PublicIp
+
+  PublisherPrivateIP:
+    Description: Private IP of the Publisher instance
+    Value: !GetAtt PublisherInstance.PrivateIp
+
+  EstimatedCost:
+    Description: Estimated hourly cost (Spot pricing varies)
+    Value: "~$0.50-$1.00/hr for 7 Spot instances. REMEMBER TO RUN teardown.sh WHEN DONE."

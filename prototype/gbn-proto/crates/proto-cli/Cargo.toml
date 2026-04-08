@@ -1,0 +1,24 @@
+[package]
+name = "proto-cli"
+description = "GBN Prototype CLI: orchestrates the full MCN pipeline for testing and demonstration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "gbn-proto"
+path = "src/main.rs"
+
+[dependencies]
+gbn-protocol = { path = "../gbn-protocol" }
+mcn-sanitizer = { path = "../mcn-sanitizer" }
+mcn-chunker = { path = "../mcn-chunker" }
+mcn-crypto = { path = "../mcn-crypto" }
+mcn-router-sim = { path = "../mcn-router-sim" }
+mpub-receiver = { path = "../mpub-receiver" }
+tokio = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde_json = { workspace = true }

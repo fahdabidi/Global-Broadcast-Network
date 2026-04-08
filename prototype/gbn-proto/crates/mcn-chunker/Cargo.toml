@@ -1,0 +1,17 @@
+[package]
+name = "mcn-chunker"
+description = "GBN Media Creation Network: streaming video chunker with BLAKE3 content-addressed manifest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gbn-protocol = { path = "../gbn-protocol" }
+blake3 = { workspace = true }
+rand = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

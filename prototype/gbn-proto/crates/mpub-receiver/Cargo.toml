@@ -1,0 +1,20 @@
+[package]
+name = "mpub-receiver"
+description = "GBN Media Publishing: chunk reception, decryption, verification, and video reassembly"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gbn-protocol = { path = "../gbn-protocol" }
+mcn-crypto = { path = "../mcn-crypto" }
+tokio = { workspace = true }
+blake3 = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

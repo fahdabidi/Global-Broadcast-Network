@@ -1,0 +1,17 @@
+# Prototype artifacts — do not commit to git
+/target/
+test-vectors/*.mp4
+test-vectors/*.mkv
+test-vectors/*.webm
+test-vectors/*.mov
+test-vectors/*.avi
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,13 @@
+[package]
+name = "gbn-protocol"
+description = "GBN shared protocol definitions: wire formats, traits, crypto interfaces, and constants"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+blake3 = { workspace = true }
+ed25519-dalek = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { workspace = true }
