@@ -37,6 +37,9 @@ Additionally, if an Exit Node inherits the geo-fencing of a hostile region (mean
 ### 3.2 Resistance to Anonymity Circumvention
 An adversary attempting to deanonymize the Creator by running their own relay node will fail due to the onion routing. If the adversary controls the Middle node, they see only encrypted traffic from the Guard going to the Exit. Furthermore, the MCN injects randomized timing jitter (50–500ms) between chunk transmissions. This defends against an adversary trying to match packet volumes and timing at the Creator's ISP with packets arriving at the Publisher.
 
+### 3.3 Resistance to Temporal Rebuild Correlation
+If an adversary intentionally drops traffic at a node they control (or observes a node dropping offline), they might attempt to correlate the dropped circuit with a newly rebuilt circuit if both use the same Guard node simultaneously. The **Circuit Manager** prevents this by guaranteeing that any replacement circuit dialed to recover dropped chunks uses an entirely distinct path, strictly avoiding the re-use of the previous Guard node.
+
 ---
 
 ## 4. Formal Threat Model (STRIDE)

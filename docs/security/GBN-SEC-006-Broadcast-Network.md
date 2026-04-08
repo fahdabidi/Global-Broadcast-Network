@@ -45,9 +45,9 @@ Even if an adversary compromises a relay node, they learn almost nothing. By des
 |---|---|---|
 | **Spoofing** | Adversary attempts to hijack a relay connection | The Noise_XX handshake mutually authenticates both nodes using their static Ed25519 keys alongside ephemeral keys. |
 | **Tampering** | ISP attempts to alter bytes in transit | Layer 2 is encrypted with ChaCha20-Poly1305. Any alteration immediately causes MAC verification failure and drops the connection. |
-| **Repudiation** | Node drops traffic but denies doing so | The MCN's separate reverse-ACK circuit detects dropped packets, penalizing the reputation of nodes in non-performing chains. |
+| **Repudiation / Dropout** | Node drops traffic but denies doing so or abruptly goes offline | The MCN's reverse-ACK circuit and continuous Layer 2 Heartbeat (PING/PONG) detect dropped packets or dead nodes within 5 seconds. Failing circuits are aggressively torn down, chunks get re-queued, and node reputations are penalized network-wide via `PeerDropped` gossip. |
 | **Information Disclosure** | Police extract long-term keys from a seized relay to read past traffic | Perfect Forward Secrecy (PFS). Because session keys are derived via ephemeral ECDH, discovering the long-term identity key today does not allow decryption of yesterday's captured PCAP files. |
-| **Denial of Service** | Adversary runs relays and deliberately drops all traffic (Blackholing) | Circuit testing and reputation systems constantly monitor relays. Relays that fail tests or demonstrate high latency are deprioritized by client Circuit Managers. |
+| **Denial of Service** | Adversary runs relays and deliberately drops all traffic (Blackholing) | Circuit testing and reputation systems constantly monitor relays. Relying on concurrent opportunistic dialing (rather than fixed pre-built standby circuits) allows the BON to instantly bypass black-hole relays and construct new recovery circuits dynamically. |
 | **Elevation of Privilege** | Transport layer vulnerability exploited to execute code | The Pluggable Transport stack is written in memory-safe Rust, minimizing common buffer overflows or use-after-free RCEs. |
 
 ---

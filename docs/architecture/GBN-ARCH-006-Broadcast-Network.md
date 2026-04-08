@@ -207,7 +207,7 @@ sequenceDiagram
     end
 ```
 
-### 4.5 IP Renegotiation
+### 4.5 Network State Gossip (IP Renegotiation & Dropouts)
 
 ```mermaid
 sequenceDiagram
@@ -215,16 +215,25 @@ sequenceDiagram
     participant Peers as Active Peer Set (5-10)
     participant Gossip as Downstream peers
 
-    Note over Node: IP changes (WiFi → Cellular, or app restart)
-    Node->>Node: Detect new BON address via STUN
+    Note over Node: IP changes (WiFi → Cellular) or Shutdown
+    Node->>Node: Detect new address or trigger shutdown
     Node->>Node: Increment sequence_no
-    Node->>Node: Sign IPRenegotiation{node_id, new_address, ts, seq_no}
-    Node->>Peers: Broadcast IPRenegotiation to all active peers
+    Node->>Node: Sign NetworkState{node_id, status: ONLINE(new_ip) | OFFLINE, seq_no}
+    Node->>Peers: Broadcast NetworkState
     Peers->>Peers: Validate signature + seq_no > last_known
-    Peers->>Peers: Update routing table: node_id → new_address
-    Peers->>Gossip: Forward renegotiation (TTL = 2)
-    Gossip->>Gossip: Validate + update + propagate (if TTL > 0)
+    Peers->>Peers: Update routing table: node_id → new_address (or purge if OFFLINE)
+    
+    Note over Peers: If adjacent Node drops abruptly (TCP close/Timeout)
+    Peers->>Peers: Peer flags node_id as DROPPED
+    Peers->>Gossip: Broadcast NetworkState{node_id, status: DROPPED, sig: peer_sig}
 ```
+
+### 4.6 Heartbeat Protocol (Keepalives)
+
+To enable circuit managers to fail-fast when routing over ephemeral IoT hardware, the BON implements a **Heatbeat Ping** over the active Noise_XX sessions:
+- A `PING` control message is injected every 5 seconds into the Noise layer.
+- The adjacent node must respond with a `PONG` within 2 seconds.
+- If a `PONG` is not received, the connection is immediately terminated, signaling a circuit collapse upstream, triggering immediate dynamic circuit recalculation and un-ACKed chunk reassignment.
 
 ---
 
@@ -368,10 +377,10 @@ WebTunnel transport implements a camouflage server:
 | Metric | Target | Mechanism |
 |---|---|---|
 | Concurrent circuits per relay | ≥ 1000 | Async I/O; one Tokio task per circuit |
-| Per-hop latency | ≤ 50ms | Minimal processing per hop; circuit pre-build |
-| Circuit build time | < 2 seconds | Pre-built standby circuit pool (3 circuits maintained) |
+| Per-hop latency | ≤ 50ms | Minimal processing per hop; continuous Keepalives |
+| Circuit recovery time | < 3 seconds | Dynamic, concurrent path dialing (opportunistic construction) |
 | Relay throughput | ≥ 100 Mbps | Zero-copy buffer passing; Tokio async networking |
-| Node discovery convergence | < 5 minutes | HyParView gossip with O(log N) propagation |
+| Node discovery convergence | < 5 minutes | HyParView gossip with O(log N) propagation and rapid dropout clearing |
 
 ---
 

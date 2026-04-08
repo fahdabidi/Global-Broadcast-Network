@@ -84,8 +84,9 @@ The MCN operates on the principle of **zero-knowledge transit**: relay nodes in 
 | MCN-FR-032 | Routing information for each hop SHALL be encrypted using that relay node's public key (onion layering) | **Must** |
 | MCN-FR-033 | Relay nodes SHALL be selected randomly from the available relay pool, weighted by reputation score | **Must** |
 | MCN-FR-034 | The MCN Client SHALL implement circuit isolation (multipath routing) — different chunks from the same video MUST be sent through independent relay circuits to prevent single-Exit-Node data capture | **Must** |
-| MCN-FR-035 | The MCN SHALL support a "guard node" concept — a stable first hop chosen from a high-reputation subset to reduce first-hop deanonymization risk | **Should** |
+| MCN-FR-035 | The MCN SHALL support a "guard node" concept — a stable first hop chosen from a high-reputation subset. If a guard drops abruptly, the Circuit Manager SHALL select a completely distinct guard to prevent temporal rebuild correlation | **Should** |
 | MCN-FR-036 | The MCN Client SHALL add randomized timing jitter (50–500ms) between chunk transmissions to resist timing correlation attacks | **Should** |
+| MCN-FR-036a | The Circuit Manager SHALL track all unacknowledged chunks and immediately reassign them to surviving parallel circuits or newly dialed circuits if a circuit collapses or a `CHUNK_ACK` times out | **Must** |
 | MCN-FR-037 | The MCN Client SHOULD send cover traffic (dummy encrypted packets) during upload pauses to prevent upload-timing fingerprinting | **Could** |
 | MCN-FR-038 | The Circuit Manager SHALL preferentially select Exit Nodes (Hop 3) located in different geographic jurisdictions from the Creator to prevent inherited geo-fencing | **Must** |
 | MCN-FR-039 | Upon circuit extension failure to the Publisher (e.g. Exit node unable to reach Publisher due to local geo-fence), the Circuit Manager SHALL automatically tear down the circuit and retry with a new Exit Node in a different region | **Must** |

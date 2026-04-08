@@ -1,4 +1,4 @@
-﻿# ðŸŒ Global Broadcast Network (GBN) â€” Prototype Workspace
+# ðŸŒ Global Broadcast Network (GBN) â€” Prototype Workspace
 
 **A decentralized, censorship-resistant video creation, publishing, and distribution platform â€” designed so truth can travel faster than it can be suppressed.**
 
@@ -231,6 +231,10 @@ Detailed security docs:
 - [GBN-SEC-005 â€” Video Playback App](../../docs/security/GBN-SEC-005-Video-Playback-App.md)
 - [GBN-SEC-006 â€” Broadcast Network](../../docs/security/GBN-SEC-006-Broadcast-Network.md)
 - [GBN-SEC-007 â€” Software Supply Chain](../../docs/security/GBN-SEC-007-Software-Supply-Chain.md)
+
+### Dynamic Circuit Rebuilding & Anonymity
+
+Because the GBN relies on consumer devices scaling dynamically to provide routing services, node churn is inevitable. The architecture implements **Active Heartbeat Disconnects** over the inner `Noise_XX` layer, enabling near-instantaneous detection of relay failure. Upon failure, dropping circuits immediately release un-ACKed chunks into a reassignment queue, dialing fresh circuits. To resist **Temporal Circuit Correlation** (adversaries mapping sequential circuit rebuilds to origin metadata), replacement circuits explicitly select completely separate Guard hubs — rendering temporal drops disjoint and preserving anonymity.
 
 ### Important limitations
 

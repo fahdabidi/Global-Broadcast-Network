@@ -167,6 +167,9 @@ Onion Wrapping (per relay hop):
       │              │             │◀──ACK fwd───┤             │           │
       │◀─────ACK delivered─────────┤             │             │           │
       │              │             │             │             │           │
+      │──Circuit/ACK Timeout?──────┤             │             │           │
+      │  In-flight chunks reassigned to surviving circuits       │           │
+      │              │             │             │             │           │
 ```
 
 ---
@@ -218,6 +221,13 @@ CHUNK_ACK {
 }
 
 Sent via reverse BON circuit (different from upload circuit).
+
+### 4.4 Chunk Reassignment and Resiliency
+
+Because the relay network heavily utilizes unreliable IoT devices (laptops, phones), the **Circuit Manager** maintains an **In-Flight Chunk Queue**:
+- When a chunk is transmitted, it is tracked against its assigned `circuit_id` and marked as `in-flight`.
+- If a circuit collapses (TCP drop or missing heartbeat) OR if a `CHUNK_ACK` is not received after a configured timeout window (e.g. 10s), all unacknowledged chunks assigned to that circuit revert to the `pending` queue.
+- The Circuit Manager immediately pushes the recovered chunks onto the remaining active circuits or dynamically dials new circuits.
 ```
 
 ---
@@ -272,7 +282,8 @@ Creator's Ephemeral X25519 Keypair (per upload)
 | Attack | Mitigation Detail |
 |---|---|
 | **Traffic correlation** | Randomized timing jitter (50–500ms) + optional cover traffic between chunks |
-| **First-hop deanonymization** | Guard node selection from high-reputation pool; guard rotated monthly |
+| **First-hop deanonymization** | Guard node selection from high-reputation pool; Guard dynamically selected per-session to match ephemeral IoT network topologies |
+| **Temporal Circuit Rebuild Correlation** | If a circuit collapses downstream of Guard $G_1$, the Circuit Manager MUST NOT rebuild the recovery circuit using $G_1$. Entirely distinct nodes form the replacement circuit to prevent $G_1$ from observing temporally adjacent rebuilds and deducing they belong to the same Creator |
 | **Video metadata fingerprint** | FFmpeg strips ALL metadata; container is remuxed (not just metadata deleted) |
 | **Codec fingerprint (e.g., iPhone encoder)** | `libx264` force-re-encode with `--params` stripped if codec fingerprinting detected |
 | **Chunk size traffic analysis** | Chunks padded to standard sizes; fractional last chunk padded to chunk_size |
@@ -285,7 +296,7 @@ Creator's Ephemeral X25519 Keypair (per upload)
 |---|---|---|
 | Upload throughput | 500MB in < 30 min on 1Mbps | Parallel multi-path routing; multiple circuits |
 | Memory usage during chunking | < 500MB for 4GB video | Streaming chunker; only 2 chunks in memory at a time |
-| Circuit build time | < 2 seconds | Pre-built standby circuits; circuit pool maintained |
+| Circuit recovery/build time | < 2 seconds | Opportunistic Just-In-Time circuit building via concurrent path dialing |
 | CPU usage for encryption | < 20% on mid-range Android | ChaCha20-Poly1305 is SIMD-optimized; hardware AES on modern phones |
 
 ---

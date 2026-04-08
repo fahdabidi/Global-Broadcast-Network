@@ -54,6 +54,7 @@ The BON solves three fundamental problems:
 | BON-FR-003 | Session keys SHALL be rotated after every 1 hour or 1GB of traffic, whichever comes first | **Should** |
 | BON-FR-004 | The handshake SHALL authenticate both parties by their Ed25519 node keys | **Must** |
 | BON-FR-005 | The BON SHALL encrypt the packet payload AND routing headers (onion layer) so that interceptors cannot determine packet routing even from the outer headers | **Must** |
+| BON-FR-006 | The BON SHALL implement a continuous Heartbeat/Keepalive (PING/PONG) over the established Noise_XX session to detect circuit collapse within 5 seconds | **Must** |
 
 ### 3.2 Pluggable Transport Layer
 
@@ -101,6 +102,7 @@ The BON solves three fundamental problems:
 | BON-FR-043 | Receiving nodes SHALL validate the Ed25519 signature on a renegotiation announcement before updating their peer address table | **Must** |
 | BON-FR-044 | Nodes SHALL timestamp renegotiation announcements; stale announcements (>5 minutes old) SHALL be rejected | **Must** |
 | BON-FR-045 | The BON SHALL maintain a local routing table mapping node IDs to their most recently confirmed BON addresses | **Must** |
+| BON-FR-046 | Adjacent nodes that detect a link failure (via Timeout or Keepalive drop) SHALL broadcast a signed `PeerDropped` gossip message to rapid-purge dead nodes from the DHT | **Must** |
 
 ### 3.6 Cover Traffic
 
