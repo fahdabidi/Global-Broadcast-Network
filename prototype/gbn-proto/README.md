@@ -1,20 +1,20 @@
-# 🌐 Global Broadcast Network (GBN) — Prototype Workspace
+﻿# ðŸŒ Global Broadcast Network (GBN) â€” Prototype Workspace
 
-**A decentralized, censorship-resistant video creation, publishing, and distribution platform — designed so truth can travel faster than it can be suppressed.**
+**A decentralized, censorship-resistant video creation, publishing, and distribution platform â€” designed so truth can travel faster than it can be suppressed.**
 
 > *"The internet treats censorship as damage and routes around it."*
-> — John Gilmore
+> â€” John Gilmore
 
 ---
 
-## ⚠️ Project Status
+## âš ï¸ Project Status
 
 This repository is an **active prototype** (`gbn-proto`) for validating core architecture and security assumptions.
 
-- ✅ Core Rust workspace and crate boundaries are in place
-- ✅ Integration test scaffolding exists for metadata stripping, multipath reassembly, tamper detection, and end-to-end pipeline tests
-- 🚧 CLI orchestration commands are partially implemented (see `crates/proto-cli/src/main.rs`)
-- 🚧 Not production-ready; APIs and protocols are expected to evolve during prototyping
+- âœ… Core Rust workspace and crate boundaries are in place
+- âœ… Integration test scaffolding exists for metadata stripping, multipath reassembly, tamper detection, and end-to-end pipeline tests
+- ðŸš§ CLI orchestration commands are partially implemented (see `crates/proto-cli/src/main.rs`)
+- ðŸš§ Not production-ready; APIs and protocols are expected to evolve during prototyping
 
 If you are looking for full system design docs (requirements, architecture, security), see [`../../docs/`](../../docs/).
 
@@ -61,17 +61,17 @@ Existing options leave major gaps:
 - **Tor + generic file sharing** protects uploader routing but does not provide an integrated publisher trust + distribution pipeline.
 - **VPNs** shift trust to the VPN operator.
 
-The **Global Broadcast Network** aims to provide a complete, end-to-end pipeline — from capture to playback — such that no single point of failure can trivially identify creators or suppress distribution.
+The **Global Broadcast Network** aims to provide a complete, end-to-end pipeline â€” from capture to playback â€” such that no single point of failure can trivially identify creators or suppress distribution.
 
 ### Design Principles
 
 | Principle | What It Means In Practice |
 |---|---|
-| 🔒 **Privacy by Default** | End-to-end encryption and local metadata sanitization before transmission |
-| 🌍 **Resilience over Efficiency** | Erasure-coded distribution across geographically diverse nodes |
-| ⚖️ **Legal Responsibility at the Edges** | Editorial/legal responsibility is with Publishers and Content Providers |
-| 🧬 **Adaptive to Adversaries** | Pluggable transport strategy evolves against censorship techniques |
-| 🛡️ **Sovereign Updates** | Supply-chain hardening via reproducible builds and multi-party governance (see [GBN-SEC-007](../../docs/security/GBN-SEC-007-Software-Supply-Chain.md)) |
+| ðŸ”’ **Privacy by Default** | End-to-end encryption and local metadata sanitization before transmission |
+| ðŸŒ **Resilience over Efficiency** | Erasure-coded distribution across geographically diverse nodes |
+| âš–ï¸ **Legal Responsibility at the Edges** | Editorial/legal responsibility is with Publishers and Content Providers |
+| ðŸ§¬ **Adaptive to Adversaries** | Pluggable transport strategy evolves against censorship techniques |
+| ðŸ›¡ï¸ **Sovereign Updates** | Supply-chain hardening via reproducible builds and multi-party governance (see [GBN-SEC-007](../../docs/security/GBN-SEC-007-Software-Supply-Chain.md)) |
 
 ---
 
@@ -79,70 +79,71 @@ The **Global Broadcast Network** aims to provide a complete, end-to-end pipeline
 
 ### Journey of a Video
 
-```mermaid
-graph LR
-    subgraph Creator["🎥 Creator (Hostile Jurisdiction)"]
-        A1["Record Video"]
-        A2["Strip Metadata\n(GPS, device ID, timestamps)"]
-        A3["Chunk into 1MB pieces"]
-        A4["Encrypt each chunk\n(AES-256-GCM)"]
-    end
+```
+  CREATOR                      RELAY NETWORK                       PUBLISHER
+  (hostile jurisdiction)       (3-hop onion routing)               (trusted entity)
 
-    subgraph MCN["🔀 Media Creation Network"]
-        B1["Relay Hop 1\n(Guard Node)"]
-        B2["Relay Hop 2\n(Middle Node)"]
-        B3["Relay Hop 3\n(Exit Node)"]
-    end
-
-    subgraph Publisher["📰 Publisher"]
-        C1["Receive chunks\n(out-of-order, multipath)"]
-        C2["Decrypt & reassemble"]
-        C3["Editorial review"]
-        C4["Sign with Ed25519"]
-    end
-
-    subgraph GDS["💾 Global Storage"]
-        D1["Reed-Solomon\nerasure coding"]
-        D2["Distribute 20 shards\nacross global nodes"]
-    end
-
-    subgraph Viewer["📱 Viewer"]
-        E1["Discover via\npeer gossip"]
-        E2["Fetch 14 of 20\nshards via BON"]
-        E3["Reconstruct\n& play video"]
-    end
-
-    A1 --> A2 --> A3 --> A4
-    A4 -->|"Path 1"| B1 --> B2 --> B3
-    A4 -.->|"Path 2 (different circuit)"| B3
-    A4 -.->|"Path 3 (different circuit)"| B3
-    B3 --> C1 --> C2 --> C3 --> C4
-    C4 --> D1 --> D2
-    D2 --> E1 --> E2 --> E3
+ +---------------------+                                       +---------------------+
+ | 1. Record video     |       +=======================+       | 5. Receive chunks   |
+ | 2. Strip metadata   |       |  Path 1               |       |    (out-of-order)   |
+ |    (GPS, device ID, |------>|  Guard > Middle > Exit |------>| 6. Decrypt each     |
+ |     timestamps)     |       +=======================+       | 7. Verify BLAKE3    |
+ | 3. Chunk (1MB each) |       +=======================+       | 8. Reassemble video |
+ | 4. Encrypt chunks   |------>|  Path 2 (diff circuit) |------>| 9. Editorial review |
+ |    (AES-256-GCM)    |       +=======================+       |10. Sign (Ed25519)   |
+ |                     |       +=======================+       |                     |
+ |                     |------>|  Path 3 (diff circuit) |------>|                     |
+ +---------------------+       +=======================+       +----------+----------+
+                                                                          |
+                          GLOBAL DISTRIBUTED STORAGE                      |
+                        +---------------------------------------------<---+
+                        |
+                        v
+ +------------------------------------------------------------------------------+
+ |  Reed-Solomon erasure coding: split into 20 shards (14 data + 6 parity).    |
+ |  Distribute across volunteer nodes worldwide. ANY 14 of 20 shards can       |
+ |  reconstruct the original. Content survives seizure of 6 nodes. Each shard  |
+ | can have many replicas                                                      |
+ +-------------------------------------+----------------------------------------+
+                                        |
+                          VIEWER         |
+                        +----------------+
+                        |
+                        v
+              +-------------------+
+              | Discover content  |
+              | via peer gossip   |
+              |        |          |
+              | Fetch 14 of 20   |
+              | shards via BON   |
+              |        |          |
+              | Reconstruct and  |
+              | play video       |
+              +-------------------+
 ```
 
 ### What each participant can observe
 
 ```text
-Creator      → Sees: local video + target Publisher key
+Creator      â†’ Sees: local video + target Publisher key
                Cannot see: full relay topology
 
-Guard relay  → Sees: previous hop + next hop
+Guard relay  â†’ Sees: previous hop + next hop
                Cannot see: payload plaintext or final destination context
 
-Middle relay → Sees: adjacent hops only
+Middle relay â†’ Sees: adjacent hops only
                Cannot see: creator identity, publisher identity, or content plaintext
 
-Exit relay   → Sees: prior hop and destination endpoint
+Exit relay   â†’ Sees: prior hop and destination endpoint
                Cannot see: origin creator identity
 
-Publisher    → Sees: decrypted submitted content
+Publisher    â†’ Sees: decrypted submitted content
                Cannot see: creator origin IP/path
 
-Storage node → Sees: encrypted shards by content-addressed ID
+Storage node â†’ Sees: encrypted shards by content-addressed ID
                Cannot see: plaintext media
 
-Viewer       → Sees: playable stream/content
+Viewer       â†’ Sees: playable stream/content
                Cannot see: creator identity or full relay path
 ```
 
@@ -164,28 +165,28 @@ Viewer       → Sees: playable stream/content
 
 ```text
 gbn-proto/
-├── Cargo.toml
-├── README.md
-├── crates/
-│   ├── gbn-protocol/
-│   ├── mcn-sanitizer/
-│   ├── mcn-chunker/
-│   ├── mcn-crypto/
-│   ├── mcn-router-sim/
-│   ├── mpub-receiver/
-│   └── proto-cli/
-├── infra/
-│   ├── README-infra.md
-│   ├── cloudformation/
-│   └── scripts/
-├── test-vectors/
-│   └── README.md
-└── tests/
-    └── integration/
-        ├── test_metadata_stripping.rs
-        ├── test_multipath_reassembly.rs
-        ├── test_tamper_detection.rs
-        └── test_full_pipeline.rs
+â”œâ”€â”€ Cargo.toml
+â”œâ”€â”€ README.md
+â”œâ”€â”€ crates/
+â”‚   â”œâ”€â”€ gbn-protocol/
+â”‚   â”œâ”€â”€ mcn-sanitizer/
+â”‚   â”œâ”€â”€ mcn-chunker/
+â”‚   â”œâ”€â”€ mcn-crypto/
+â”‚   â”œâ”€â”€ mcn-router-sim/
+â”‚   â”œâ”€â”€ mpub-receiver/
+â”‚   â””â”€â”€ proto-cli/
+â”œâ”€â”€ infra/
+â”‚   â”œâ”€â”€ README-infra.md
+â”‚   â”œâ”€â”€ cloudformation/
+â”‚   â””â”€â”€ scripts/
+â”œâ”€â”€ test-vectors/
+â”‚   â””â”€â”€ README.md
+â””â”€â”€ tests/
+    â””â”€â”€ integration/
+        â”œâ”€â”€ test_metadata_stripping.rs
+        â”œâ”€â”€ test_multipath_reassembly.rs
+        â”œâ”€â”€ test_tamper_detection.rs
+        â””â”€â”€ test_full_pipeline.rs
 ```
 
 ---
@@ -207,14 +208,14 @@ gbn-proto/
 
 ## Prototyping Phases
 
-### Phase 1 — Media Creation Network & reconstruction
-📄 Plan: [`../../docs/prototyping/GBN-PROTO-001-Phase1-Media-Creation.md`](../../docs/prototyping/GBN-PROTO-001-Phase1-Media-Creation.md)
+### Phase 1 â€” Media Creation Network & reconstruction
+ðŸ“„ Plan: [`../../docs/prototyping/GBN-PROTO-001-Phase1-Media-Creation.md`](../../docs/prototyping/GBN-PROTO-001-Phase1-Media-Creation.md)
 
-### Phase 2 — Publishing & distributed storage
-📄 Plan: [`../../docs/prototyping/GBN-PROTO-002-Phase2-Publishing-Storage.md`](../../docs/prototyping/GBN-PROTO-002-Phase2-Publishing-Storage.md)
+### Phase 2 â€” Publishing & distributed storage
+ðŸ“„ Plan: [`../../docs/prototyping/GBN-PROTO-002-Phase2-Publishing-Storage.md`](../../docs/prototyping/GBN-PROTO-002-Phase2-Publishing-Storage.md)
 
-### Phase 3 — Overlay broadcast network & playback
-📄 Plan: [`../../docs/prototyping/GBN-PROTO-003-Phase3-Broadcast-Playback.md`](../../docs/prototyping/GBN-PROTO-003-Phase3-Broadcast-Playback.md)
+### Phase 3 â€” Overlay broadcast network & playback
+ðŸ“„ Plan: [`../../docs/prototyping/GBN-PROTO-003-Phase3-Broadcast-Playback.md`](../../docs/prototyping/GBN-PROTO-003-Phase3-Broadcast-Playback.md)
 
 ---
 
@@ -223,13 +224,13 @@ gbn-proto/
 GBN uses a **Zero-Knowledge Transit** design goal: intermediate nodes should know only what is necessary for forwarding.
 
 Detailed security docs:
-- [GBN-SEC-001 — Media Creation Network](../../docs/security/GBN-SEC-001-Media-Creation-Network.md)
-- [GBN-SEC-002 — Media Publishing](../../docs/security/GBN-SEC-002-Media-Publishing.md)
-- [GBN-SEC-003 — Global Distributed Storage](../../docs/security/GBN-SEC-003-Global-Distributed-Storage.md)
-- [GBN-SEC-004 — Video Content Providers](../../docs/security/GBN-SEC-004-Video-Content-Providers.md)
-- [GBN-SEC-005 — Video Playback App](../../docs/security/GBN-SEC-005-Video-Playback-App.md)
-- [GBN-SEC-006 — Broadcast Network](../../docs/security/GBN-SEC-006-Broadcast-Network.md)
-- [GBN-SEC-007 — Software Supply Chain](../../docs/security/GBN-SEC-007-Software-Supply-Chain.md)
+- [GBN-SEC-001 â€” Media Creation Network](../../docs/security/GBN-SEC-001-Media-Creation-Network.md)
+- [GBN-SEC-002 â€” Media Publishing](../../docs/security/GBN-SEC-002-Media-Publishing.md)
+- [GBN-SEC-003 â€” Global Distributed Storage](../../docs/security/GBN-SEC-003-Global-Distributed-Storage.md)
+- [GBN-SEC-004 â€” Video Content Providers](../../docs/security/GBN-SEC-004-Video-Content-Providers.md)
+- [GBN-SEC-005 â€” Video Playback App](../../docs/security/GBN-SEC-005-Video-Playback-App.md)
+- [GBN-SEC-006 â€” Broadcast Network](../../docs/security/GBN-SEC-006-Broadcast-Network.md)
+- [GBN-SEC-007 â€” Software Supply Chain](../../docs/security/GBN-SEC-007-Software-Supply-Chain.md)
 
 ### Important limitations
 
