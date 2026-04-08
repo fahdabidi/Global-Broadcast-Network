@@ -9,6 +9,7 @@
 
 pub mod swarm;
 pub mod relay_engine;
+pub mod circuit_manager;
 
 use std::{
     net::SocketAddr,
