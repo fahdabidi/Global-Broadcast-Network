@@ -33,9 +33,9 @@ This document tracks the step-by-step execution roadmap to upgrade the `gbn-prot
 - `[x]` Write the Circuit Failure fallback: if a heartbeat times out, dynamically query the DHT for a new route and re-queue un-ACKed chunks to it.
 
 ## Step 6: Local Security Integration Tests
-- `[ ]` Construct `S1.6`: Telescopic Sinkhole simulation (validate Guard is mathematically prevented from dropping middle packet).
-- `[ ]` Construct `S1.7`: DHT Spoofing simulation (validate Circuit Manager rejects invalid signed IPs).
-- `[ ]` Construct `S1.9`: Heartbeat Rebuild test (kill standard process manually and ensure video chunks reliably arrive at Publisher).
+- `[x]` Construct `S1.6`: Telescopic Sinkhole simulation (validate Guard is mathematically prevented from dropping middle packet).
+- `[x]` Construct `S1.7`: DHT Spoofing simulation (validate Circuit Manager rejects invalid signed IPs).
+- `[x]` Construct `S1.9`: Heartbeat Rebuild test (kill standard process manually and ensure video chunks reliably arrive at Publisher).
 
 ## Step 7: End-to-End AWS Deployment Validation
 - `[ ]` Revise `infra/scripts` to compile with the new async libp2p binaries.
