@@ -10,7 +10,7 @@
 
 ## 1. Phase Goal
 
-**Prove that a video file can be anonymized, chunked, encrypted, and routed via Telescopic Onion Routing resolving endpoints via a Kademlia DHT. The chunks must securely traverse multiple independent simulated paths across separate EC2 instances, be validated against blackholes, received out-of-order by a Publisher using a cryptographic Root of Trust, and perfectly reconstructed with zero data loss or metadata leakage.**
+**Prove that a video file can be anonymized, chunked, encrypted, and routed via Telescopic Onion Routing resolving endpoints via a Kademlia DHT. The chunks must securely traverse multiple independent simulated paths across separate EC2 instances, be validated against blackholes, received out-of-order by a Publisher using a cryptographic Root of Trust, and perfectly reconstructed with zero data loss or metadata leakage. Validating route recovery if nodes are taken down mid-transmission must also be proven.**
 
 This phase is no longer a simple TCP-forwarding testbed. It validates the full zero-trust, end-to-end data pipeline from Creator device to Publisher reassembly on AWS infrastructure. Relay hops use nested `Noise_XX` handshakes across EC2 Spot instances in different availability zones, demonstrating cryptographic validation of route integrity against malicious relays and identity spoofers.
 
@@ -27,6 +27,8 @@ This phase is no longer a simple TCP-forwarding testbed. It validates the full z
 | A5 | Multipath routing (sending chunks across N independent simulated paths with random delays) does not cause reassembly failures | If ordering/session-tracking breaks, the manifest protocol needs redesign |
 | A6 | A tampered chunk (even 1 flipped bit) is reliably rejected by AES-256-GCM authentication before reassembly | If tampered chunks slip through, integrity model is broken |
 | A7 | The entire pipeline (sanitize → chunk → encrypt → route → decrypt → reassemble) can process a 500MB video within the performance targets (~60s preprocessing, <30min total) | If too slow, architecture needs optimization |
+| A8 | Nested `Noise_XX` handshakes across 3 relays (Telescopic Circuit) does not exceed computational overhead limits for streaming mobile uploads | If latency is too high, the MCN will stall video ingest |
+| A9 | Kademlia DHT passive syncing enables route discovery fast enough to support live, dynamic circuit fallback during node loss | If discovery drags, dropped chunks cannot be quickly requeued via Heartbeats |
 
 ---
 
@@ -208,6 +210,7 @@ The user provides their own sample video file(s). The deployment script uploads 
 | S1.6 | **Telescopic Sinkhole Attack** | Simulate a Guard node dropping a Middle handshake and faking success; Circuit Manager MUST block it |
 | S1.7 | **DHT Publisher Spoofing** | Adversary injects IP with invalid signature into DHT; Circuit Manager MUST reject it due to Root of Trust violation |
 | S1.8 | **Pre-Flight Blackhole** | Simulate an EC2 node firewalled from the Internet; node MUST abort DHT RelayDescriptor announcement |
+| S1.9 | **Heartbeat Fallback & Rebuild** | Simulate node loss during media transmission (kill EC2 instance mid-transfer); Circuit Manager MUST requeue dropped chunks to new circuits with disjoint Guards |
 
 ---
 
@@ -219,6 +222,8 @@ The user provides their own sample video file(s). The deployment script uploads 
 | **x25519-dalek** | ECDH key agreement produces correct shared secrets | Switch to `ring` crate |
 | **aes-gcm** crate | Per-chunk AEAD encryption with nonce derivation works correctly | Switch to `ring::aead` |
 | **blake3** crate | Hashing performance meets targets on ARM (mobile proxy) | Fall back to SHA-256 (slower but proven) |
+| **snow** (Noise Protocol) | Nested `Noise_XX` protocol envelopes securely validate Telescopic links | Require custom libsodium handshake implementation |
+| **libp2p-kad** (or equiv) | Kademlia DHT implementation successfully resolves `RelayDescriptors` | Custom bare-bones hash table fallback |
 | **FFmpeg CLI** | Metadata stripping is complete across all containers | May need custom Matroska/MP4 parser for edge cases |
 | **tokio** | Async I/O for relay network performs adequately across real TCP connections | N/A — tokio is standard |
 | **AWS CloudFormation** | Can we define the full test infrastructure as code and launch/teardown reliably? | Terraform or AWS CDK |
@@ -233,7 +238,7 @@ Phase 1 is **PASSED** when ALL of the following are true:
 - [ ] CloudFormation stack launches successfully and all 7 instances reach `running` state
 - [ ] Rust binaries compile and deploy to all instances via bootstrap scripts
 - [ ] All 10 correctness tests (T1.1–T1.10) pass on AWS infrastructure
-- [ ] All 5 security validation tests (S1.1–S1.5) pass on AWS infrastructure
+- [ ] All 9 security validation tests (S1.1–S1.9) pass on AWS infrastructure
 - [ ] User-provided 500MB video completes the full pipeline in < 300 seconds (cross-AZ)
 - [ ] Peak memory usage stays below 50MB on the Creator instance during processing
 - [ ] The reassembled video on the Publisher instance is byte-identical to the sanitized original (SHA-256 match)
