@@ -24,8 +24,8 @@ This document tracks the step-by-step execution roadmap to upgrade the `gbn-prot
 - `[x]` Allow the Creator client to passively sync DHT buckets to discover listening relays.
 
 ## Step 4: The Onion Router Engine
-- `[ ]` In `crates/mcn-router-sim/`, replace the basic TCP reading loop with a state-machine that unwraps envelopes.
-- `[ ]` Handle `RelayExtend` logic: if a router receives an extension request, it dials the next hop, completes the inner handshake, and links the connections in-memory.
+- `[x]` In `crates/mcn-router-sim/`, replace the basic TCP reading loop with a state-machine that unwraps envelopes.
+- `[x]` Handle `RelayExtend` logic: if a router receives an extension request, it dials the next hop, completes the inner handshake, and links the connections in-memory.
 
 ## Step 5: Circuit Manager & Dynamic Fallback
 - `[ ]` Implement the Creator's `CircuitManager`. Ensure it establishes multi-hop nested handshakes (`Guard -> Middle -> Exit`).
