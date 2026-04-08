@@ -155,7 +155,7 @@ Viewer       â†’ Sees: playable stream/content
 | `mcn-sanitizer` | Metadata sanitization pipeline |
 | `mcn-chunker` | Chunking and hash-oriented segmentation |
 | `mcn-crypto` | Key exchange + encryption flow |
-| `mcn-router-sim` | Multipath relay behavior simulation |
+| `mcn-router-sim` | Telescopic Onion Router simulation over Kademlia DHT |
 | `mpub-receiver` | Publisher-side receive/reassemble prototype path |
 | `proto-cli` | CLI orchestrator for prototype workflows |
 
@@ -208,7 +208,7 @@ gbn-proto/
 
 ## Prototyping Phases
 
-### Phase 1 â€” Media Creation Network & reconstruction
+### Phase 1 â€” Media Creation Network & zero-trust routing
 ðŸ“„ Plan: [`../../docs/prototyping/GBN-PROTO-001-Phase1-Media-Creation.md`](../../docs/prototyping/GBN-PROTO-001-Phase1-Media-Creation.md)
 
 ### Phase 2 â€” Publishing & distributed storage

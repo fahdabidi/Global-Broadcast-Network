@@ -10,9 +10,9 @@
 
 ## 1. Phase Goal
 
-**Prove that a video file can be anonymized, chunked, encrypted, sent through multiple independent relay paths across separate EC2 instances, received out-of-order by a Publisher, and perfectly reconstructed into the original video — with zero data loss, zero metadata leakage, and cryptographic integrity verified at every step.**
+**Prove that a video file can be anonymized, chunked, encrypted, and routed via Telescopic Onion Routing resolving endpoints via a Kademlia DHT. The chunks must securely traverse multiple independent simulated paths across separate EC2 instances, be validated against blackholes, received out-of-order by a Publisher using a cryptographic Root of Trust, and perfectly reconstructed with zero data loss or metadata leakage.**
 
-This phase validates the end-to-end data pipeline from Creator device to Publisher reassembly on real AWS infrastructure. Relay hops run on separate EC2 Spot instances in different availability zones, introducing real network latency and packet reordering. The full BON overlay is not required — relays use simple encrypted TCP forwarding — but the infrastructure proves the pipeline works across physical network boundaries.
+This phase is no longer a simple TCP-forwarding testbed. It validates the full zero-trust, end-to-end data pipeline from Creator device to Publisher reassembly on AWS infrastructure. Relay hops use nested `Noise_XX` handshakes across EC2 Spot instances in different availability zones, demonstrating cryptographic validation of route integrity against malicious relays and identity spoofers.
 
 ---
 
@@ -141,11 +141,11 @@ The user provides their own sample video file(s). The deployment script uploads 
 #### `mcn-router-sim`
 - **Purpose:** Multipath relay across real EC2 instances in different availability zones
 - **Implementation:**
-  - Each relay is a Rust binary deployed to a separate EC2 Spot instance
-  - Relay binary listens on a TCP port, receives encrypted chunks, and forwards to the next hop's IP:port
-  - Configurable artificial jitter (50-500ms) is added on top of real network latency
-  - The "Circuit Manager" on the Creator instance assigns chunks to paths round-robin or random
-  - 3 independent paths × 2-3 hops each = 6-9 relay instances across 3 AZs
+  - Each relay is a Rust binary deployed to a separate EC2 Spot instance utilizing `Noise_XX` handshakes.
+  - Generates Kademlia `RelayDescriptors` and simulates a rudimentary Node Directory.
+  - Creator's "Circuit Manager" performs Telescopic Handshakes (nested envelope encryption) to mathematically validate end-to-end routing sequences.
+  - Configurable artificial jitter (50-500ms) added to test Circuit Timeout logic.
+  - Simulates Malicious Nodes attempting blackhole/sinkhole routes.
 - **Key test:** All chunks traverse real network hops (with real latency + jitter) and arrive at Publisher
 - **What this proves vs localhost:** Real TCP connection establishment, real packet reordering, real cross-AZ bandwidth constraints
 
@@ -205,6 +205,9 @@ The user provides their own sample video file(s). The deployment script uploads 
 | S1.3 | **Relay sees only ciphertext** | Inject a logging relay that records all bytes passing through it; verify no plaintext video bytes appear |
 | S1.4 | **No relay sees both Creator IP and Publisher IP** | In the 3-hop simulation, verify hop 1 logs show Creator IP but NOT Publisher IP; hop 3 logs show Publisher IP but NOT Creator IP |
 | S1.5 | **Metadata stripping edge cases** | Test with: iPhone ProRes, Android HEVC, GoPro w/ GPS telemetry, DJI drone with flight data, OBS screen recording |
+| S1.6 | **Telescopic Sinkhole Attack** | Simulate a Guard node dropping a Middle handshake and faking success; Circuit Manager MUST block it |
+| S1.7 | **DHT Publisher Spoofing** | Adversary injects IP with invalid signature into DHT; Circuit Manager MUST reject it due to Root of Trust violation |
+| S1.8 | **Pre-Flight Blackhole** | Simulate an EC2 node firewalled from the Internet; node MUST abort DHT RelayDescriptor announcement |
 
 ---
 
@@ -258,8 +261,7 @@ Step 8: Run `teardown.sh` — destroys CloudFormation stack, stops billing
 
 | Limitation | Why It's Acceptable |
 |---|---|
-| No onion encryption on relay layers | Phase 3 validates onion routing; this phase focuses on content encryption |
+| No cover traffic or timing jitter analysis | Phase 3 validates complex traffic analysis resistance and constant-rate obfuscation |
 | No UI — CLI only | UI is a Phase 4+ concern; CLI proves the core logic |
 | Same AWS region (different AZs, not different regions) | Cross-region adds cost; cross-AZ proves real network traversal with measurable latency |
-| No cover traffic or timing jitter analysis | Phase 3 validates traffic analysis resistance |
 | Spot instances may be interrupted | Re-run stack; tests are idempotent; interruption is unlikely for <1hr test runs |
