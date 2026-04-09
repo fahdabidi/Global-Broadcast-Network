@@ -1,13 +1,5 @@
 [
   {
-    "ParameterKey": "KeyPairName",
-    "ParameterValue": "gbn-proto-key"
-  },
-  {
-    "ParameterKey": "DeployerIP",
-    "ParameterValue": "73.158.194.57/32"
-  },
-  {
     "ParameterKey": "CreatorInstanceType",
     "ParameterValue": "t3.small"
   },

@@ -1,25 +1,24 @@
-# GBN Phase 1 Prototype — AWS Test Runbook
+# GBN Phase 1 Prototype — AWS Test Runbook (SSM-Only)
 
-This document is the definitive, step-by-step guide to deploying and validating the Phase 1 Zero-Trust Routing Prototype on real AWS infrastructure. Follow each step in order. **Do not skip the Teardown step** — Spot instances bill continuously until the stack is destroyed.
+This runbook deploys and validates the Phase 1 prototype using **AWS CLI + SSM only**.
+No SSH, no key pair, and no public-IP based deployment steps are required.
 
 ---
 
 ## Prerequisites
 
-Before starting, ensure you have the following installed and configured on your **local machine**:
+Install/configure on your local machine:
 
-| Tool | Required For | Install |
-|---|---|---|
-| `aws` CLI | Stack management + IP querying | `pip install awscli` or [official installer](https://aws.amazon.com/cli/) |
-| `rustup` + Rust stable | Cross-compiling the relay binary | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
-| `cross` or Linux target | x86_64 Linux cross-compile | `rustup target add x86_64-unknown-linux-gnu` |
-| `ssh` + `scp` | Deploying to EC2 | Pre-installed on macOS/Linux; use Git Bash on Windows |
-| `ffmpeg` | Video metadata stripping (sanitizer) | `brew install ffmpeg` / `apt install ffmpeg` |
+| Tool | Required For |
+|---|---|
+| `aws` CLI | CloudFormation, EC2 metadata, SSM, S3 operations |
+| `rustup` + Rust stable | Building Linux release binary |
+| Linux target toolchain | `rustup target add x86_64-unknown-linux-gnu` |
+| `ffmpeg` | Creating/processing test media |
 
 You also need:
-- An **AWS account** with sufficient EC2 quota for 7 Spot instances (`t3.micro / t3.small`).
-- An **EC2 Key Pair** created in your target region (default: `us-east-1`).
-- A **test video file** (`.mp4` recommended). Minimum 50MB for meaningful testing; 500MB for full performance benchmarks.
+- AWS account with EC2 quota for the Phase 1 instances.
+- SSM-enabled IAM permissions (CloudFormation/EC2/SSM/S3/IAM).
 
 ---
 
@@ -27,280 +26,124 @@ You also need:
 
 ```bash
 aws configure
-# Enter:
-#   AWS Access Key ID:     <your key>
-#   AWS Secret Access Key: <your secret>
-#   Default region name:   us-east-1
-#   Default output format: json
-```
-
-Verify:
-```bash
 aws sts get-caller-identity
 ```
 
 ---
 
-## Step 2 — Set Your Parameters
+## Step 2 — Prepare Parameters
 
-Edit `infra/cloudformation/parameters.json`:
+`infra/cloudformation/parameters.json` should include only instance sizes (no key pair / no deployer IP):
 
 ```json
-{
-  "Parameters": [
-    { "ParameterKey": "KeyPairName",   "ParameterValue": "YOUR-KEY-PAIR-NAME" },
-    { "ParameterKey": "DeployerIP",    "ParameterValue": "YOUR.PUBLIC.IP.HERE/32" },
-    { "ParameterKey": "CreatorInstanceType",   "ParameterValue": "t3.small" },
-    { "ParameterKey": "RelayInstanceType",     "ParameterValue": "t3.micro" },
-    { "ParameterKey": "PublisherInstanceType", "ParameterValue": "t3.small" }
-  ]
-}
-```
-
-Find your public IP:
-```bash
-curl ifconfig.me
+[
+  {"ParameterKey":"CreatorInstanceType","ParameterValue":"t3.small"},
+  {"ParameterKey":"RelayInstanceType","ParameterValue":"t3.micro"},
+  {"ParameterKey":"PublisherInstanceType","ParameterValue":"t3.small"}
+]
 ```
 
 ---
 
-## Step 3 — Launch the CloudFormation Stack
+## Step 3 — Create Stack
 
 ```bash
 cd prototype/gbn-proto
 
 aws cloudformation create-stack \
-    --stack-name gbn-proto-phase1 \
-    --template-body file://infra/cloudformation/phase1-stack.yaml \
-    --parameters    file://infra/cloudformation/parameters.json \
-    --region us-east-1
+  --stack-name gbn-proto-phase1 \
+  --template-body file://infra/cloudformation/phase1-stack.yaml \
+  --parameters file://infra/cloudformation/parameters.json \
+  --capabilities CAPABILITY_IAM \
+  --region us-east-1
 
-# Wait for creation (~3-5 minutes)
-echo "Waiting for stack to be ready..."
 aws cloudformation wait stack-create-complete \
-    --stack-name gbn-proto-phase1 \
-    --region us-east-1
-
-echo "✅ Stack created."
+  --stack-name gbn-proto-phase1 \
+  --region us-east-1
 ```
 
 ---
 
-## Step 4 — Collect Instance IPs
+## Step 4 — Create a Dummy Test Video (Local)
+
+Create a small local test artifact (already gitignored by `test-vectors/*.mp4`):
 
 ```bash
-aws cloudformation describe-stacks \
-    --stack-name gbn-proto-phase1 \
-    --query 'Stacks[0].Outputs' \
-    --output table
-```
-
-Note the following IPs from the Outputs table and set them as environment variables for the rest of this runbook:
-
-```bash
-export CREATOR_IP=<CreatorPublicIP output>
-export PUBLISHER_IP=<PublisherPublicIP output>
-export RELAY1_IP=<Relay1PublicIP output>
-export RELAY2_IP=<Relay2PublicIP output>
-export RELAY3_IP=<Relay3PublicIP output>
-export RELAY4_IP=<Relay4PublicIP output>
-export SSH_KEY=~/.ssh/YOUR-KEY-PAIR-NAME.pem
-export TEST_VIDEO=/path/to/your/test-video.mp4
-```
-
-Verify SSH access to the Creator:
-```bash
-ssh -i $SSH_KEY ec2-user@$CREATOR_IP "echo SSH OK"
-```
-
-> **Note:** The bootstrap user-data script runs automatically on boot. Wait ~2 minutes after the stack reports `CREATE_COMPLETE` before SSH works.
-
----
-
-## Step 5 — Build and Deploy the Creator
-
-This step **cross-compiles** the entire workspace for Linux and uploads the binary + test video to the Creator EC2 instance.
-
-```bash
-cd prototype/gbn-proto
-
-./infra/scripts/deploy-creator.sh \
-    $CREATOR_IP \
-    $TEST_VIDEO \
-    $SSH_KEY
-```
-
-Expected output:
-```
-[1/4] Building release binaries (target: x86_64-unknown-linux-gnu)...
-[2/4] Creating remote directory...
-[3/4] Uploading binaries...
-[4/4] Uploading test video...
-✅ Creator deployment complete.
-```
-
-> **Note:** The first build downloads Rust dependencies and may take 5–10 minutes.
-
----
-
-## Step 6 — Deploy and Start Onion Relay Nodes
-
-This step deploys the binary to all 4 relay instances, generates their Ed25519 identity keypairs, and starts them in `onion-relay` mode joined to the Kademlia DHT.
-
-**Relay 1 acts as the DHT seed node** — all other relays bootstrap off it.
-
-```bash
-./infra/scripts/deploy-relays.sh \
-    $RELAY1_IP \
-    $RELAY2_IP \
-    $RELAY3_IP \
-    $RELAY4_IP \
-    $RELAY1_IP \    # DHT seed = Relay 1
-    $SSH_KEY
-```
-
-Expected output per relay:
-```
-[Relay 1] Deploying to 1.2.3.4 (port 9000)...
-Generating relay identity keypair...
-✅ Keypair generated
-✅ Started on port 9000 (DHT on 9100).
-```
-
-After all 4 are deployed, collect the relay public keys:
-```bash
-for IP in $RELAY1_IP $RELAY2_IP $RELAY3_IP $RELAY4_IP; do
-    echo "$IP → $(ssh -i $SSH_KEY ec2-user@$IP 'cat ~/gbn-proto/identity/identity.pub')"
-done
-```
-
-> These public keys are the cryptographic identities that the Creator uses to validate each `RelayExtend` Noise_XX handshake. The `run-tests.sh` script collects and distributes them automatically.
-
----
-
-## Step 7 — Deploy the Publisher Receiver
-
-```bash
-./infra/scripts/deploy-publisher.sh \
-    $PUBLISHER_IP \
-    $SSH_KEY
+mkdir -p test-vectors
+ffmpeg -f lavfi -i testsrc=size=1280x720:rate=30 -t 10 -pix_fmt yuv420p test-vectors/dummy-phase1.mp4
 ```
 
 ---
 
-## Step 8 — Run the Full Test Suite
-
-This executes the entire test pipeline:
-- Sanitize, chunk, encrypt video on the Creator
-- Route encrypted chunks through 3-hop Telescopic Onion circuits
-- Reassemble at the Publisher
-- **Trigger S1.9**: Kill Relay 1 mid-transmission, verify route recovery
-- SHA-256 integrity verification
+## Step 5 — Deploy Creator Artifacts via SSM
 
 ```bash
-./infra/scripts/run-tests.sh \
-    $CREATOR_IP \
-    $PUBLISHER_IP \
-    $RELAY1_IP \
-    $RELAY2_IP \
-    $RELAY3_IP \
-    $RELAY4_IP \
-    $SSH_KEY
+./infra/scripts/deploy-creator.sh gbn-proto-phase1 test-vectors/dummy-phase1.mp4 us-east-1
 ```
 
-Full output is saved to `/tmp/gbn-phase1-results.log` on your local machine.
-
-### Expected Final Output
-
-```
-============================================
-  Phase 1 Test Suite Results
-============================================
-
-✅ Normal pipeline: PASS
-✅ S1.9 Node Recovery: PASS
-```
-
-### What S1.9 Does (Mid-Transmission Kill)
-
-After ~15 seconds of active transmission, `run-tests.sh` kills the **Guard relay (Relay 1)** via SSH `pkill`. The Creator's Circuit Manager heartbeat watchdog detects the dead link within 10 seconds, drains the in-flight chunk queue, and re-routes all un-ACKed chunks through a **fresh circuit using a disjoint Guard node**. The test passes if the Publisher successfully reconstructs a byte-identical copy of the original video.
+This builds `gbn-proto` locally, uploads binary+video to the stack artifact bucket, then uses `aws ssm send-command` to place them on the Creator instance.
 
 ---
 
-## Step 9 — Verify Results Manually (Optional)
-
-SSH into the Publisher and inspect logs:
+## Step 6 — Deploy/Start Relays via SSM
 
 ```bash
-ssh -i $SSH_KEY ec2-user@$PUBLISHER_IP
-
-# Check normal pipeline reassembly
-ls -lh ~/gbn-proto/reassembled/
-
-# Check circuit-recovery reassembly (S1.9)
-ls -lh ~/gbn-proto/reassembled-s19/
-
-# View publisher log
-cat /tmp/publisher.log
+./infra/scripts/deploy-relays.sh gbn-proto-phase1 us-east-1
 ```
 
-SSH into any relay to inspect DHT and connection logs:
+This pushes relay artifacts via S3 and starts all 4 relays through SSM commands using private networking.
+
+---
+
+## Step 7 — Deploy Publisher via SSM
 
 ```bash
-ssh -i $SSH_KEY ec2-user@$RELAY1_IP
-cat /tmp/relay-9000.log   # Relay 1 on port 9000
+./infra/scripts/deploy-publisher.sh gbn-proto-phase1 us-east-1
 ```
 
 ---
 
-## Step 10 — Teardown (⚠️ Required — Stops Billing)
+## Step 8 — Run Full Test Suite via SSM
 
-**Run this immediately after testing is complete.**
+```bash
+./infra/scripts/run-tests.sh gbn-proto-phase1 us-east-1
+```
+
+This performs:
+- Relay pubkey collection via SSM
+- Publisher startup
+- Normal upload + verify
+- S1.9 relay-failure simulation + verify
+- Process cleanup
+
+The local consolidated log is written to:
+
+```bash
+/tmp/gbn-phase1-results.log
+```
+
+---
+
+## Step 9 — Teardown (Required)
 
 ```bash
 ./infra/cloudformation/teardown.sh
 ```
 
-Or manually:
+Or:
+
 ```bash
 aws cloudformation delete-stack --stack-name gbn-proto-phase1 --region us-east-1
 aws cloudformation wait stack-delete-complete --stack-name gbn-proto-phase1 --region us-east-1
-echo "✅ Stack deleted. Billing stopped."
-```
-
-Verify no orphaned resources:
-```bash
-aws ec2 describe-instances \
-    --filters "Name=tag:aws:cloudformation:stack-name,Values=gbn-proto-phase1" \
-    --query 'Reservations[].Instances[].InstanceId' \
-    --output text
-# Should return empty
 ```
 
 ---
 
-## Cost Reference
-
-| Resource | Count | Type | Est. $/hr |
-|---|---|---|---|
-| Creator | 1 | t3.small Spot | ~$0.006 |
-| Relay nodes | 4 | t3.micro Spot | ~$0.003 each |
-| Publisher | 1 | t3.small Spot | ~$0.006 |
-| **Total** | **7 instances** | | **~$0.024/hr** |
-
-A complete test run (build + deploy + run + teardown) takes roughly **45–60 minutes** and costs under **$0.05**.
-
----
-
-## Troubleshooting
+## Troubleshooting (SSM Mode)
 
 | Symptom | Likely Cause | Fix |
 |---|---|---|
-| `SSH connection refused` | EC2 bootstrap not done yet | Wait 2-3 min after stack CREATE_COMPLETE |
-| `DeployerIP mismatch` | Your IP changed since stack creation | Update parameters.json and redeploy Security Group rule |
-| `Spot request not fulfilled` | Capacity constrained | Change `RelayInstanceType` to `t3.nano` or try `us-west-2` |
-| `cargo build` fails (OpenSSL) | Missing linker for cross-compile | `apt install musl-tools gcc-x86-64-linux-gnu` |
-| `Identity key not found` | bootstrap-relay.sh didn't run | SSH in, run `bash ~/gbn-proto/bootstrap-relay.sh` manually |
-| `Noise_XX handshake failed` | Wrong identity key collected | Re-collect pubkeys with `cat ~/gbn-proto/identity/identity.pub` |
-| `S1.9: REASSEMBLY INCOMPLETE` | Heartbeat timeout too fast | Increase `HEARTBEAT_TIMEOUT` in `circuit_manager.rs` |
-| `Relay DHT not finding peers` | Relay started before seed was ready | Restart non-seed relays after seed is confirmed up |
+| `send-command` fails | Instance not SSM-registered yet | Wait 1-3 min after CREATE_COMPLETE and retry |
+| S3 copy denied on instance | IAM policy mismatch | Verify instance role has `s3:GetObject` on artifact bucket |
+| Script exits early | command invocation failed | Inspect `aws ssm get-command-invocation` stderr/stdout |
+| Relay peer discovery issues | Seed relay not fully started | Re-run relay deployment or restart non-seed relays |

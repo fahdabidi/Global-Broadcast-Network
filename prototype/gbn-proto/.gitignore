@@ -9,6 +9,7 @@ test-vectors/*.avi
 /source.zip
 /outputs.json
 /test-video.mp4
+infra/scripts/.relay-topology
 infra/gbn-proto-key.pem
 
 # IDE

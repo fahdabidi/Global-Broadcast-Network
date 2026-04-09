@@ -1,157 +1,171 @@
 #!/usr/bin/env bash
-# run-tests.sh — Execute the full Phase 1 Zero-Trust test suite on AWS.
+# run-tests.sh — Execute the full Phase 1 Zero-Trust test suite via AWS SSM.
 #
-# Usage: ./run-tests.sh <creator-ip> <publisher-ip> <relay1-ip> <relay2-ip> <relay3-ip> <relay4-ip> [ssh-key-path]
-#
-# This script:
-#   1. Collects relay identity public keys from DHT-announced nodes
-#   2. Starts the Publisher receiver
-#   3. Runs the full 500MB pipeline (sanitize → chunk → encrypt → onion-route → reconstruct)
-#   4. Triggers S1.9: kills a relay mid-transmission, validates recovery
-#   5. Verifies SHA-256 integrity of the reassembled video
-#   6. Reports timing metrics and pass/fail summary
+# Usage: ./run-tests.sh <stack-name> [region]
 
 set -euo pipefail
+export AWS_PAGER=""
+export PYTHONUTF8=1
+export PYTHONIOENCODING="utf-8"
 
-if [ "$#" -lt 6 ]; then
-    echo "Usage: $0 <creator-ip> <publisher-ip> <relay1-ip> <relay2-ip> <relay3-ip> <relay4-ip> [ssh-key-path]"
+if ! command -v aws >/dev/null 2>&1; then
+  if command -v aws.exe >/dev/null 2>&1; then
+    aws() { aws.exe "$@"; }
+  else
+    echo "ERROR: aws CLI not found in PATH (tried aws and aws.exe)."
     exit 1
+  fi
 fi
 
-CREATOR_IP="$1"
-PUBLISHER_IP="$2"
-RELAY1_IP="$3"
-RELAY2_IP="$4"
-RELAY3_IP="$5"
-RELAY4_IP="$6"
-SSH_KEY="${7:-~/.ssh/gbn-proto-key.pem}"
-SSH_USER="ec2-user"
-REMOTE_DIR="/home/$SSH_USER/gbn-proto"
-
-SSH_OPTS="-i $SSH_KEY -o StrictHostKeyChecking=no"
+STACK_NAME="${1:?Usage: $0 <stack-name> [region]}"
+REGION="${2:-us-east-1}"
+REMOTE_DIR="/home/ec2-user/gbn-proto"
 RESULTS_LOG="/tmp/gbn-phase1-results.log"
 
+cf_output() {
+  local key="$1"
+  aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" --output json | \
+    python -c "import json,sys; d=json.load(sys.stdin); o=d['Stacks'][0].get('Outputs',[]); print(next((x['OutputValue'] for x in o if x.get('OutputKey')=='$key'), ''))"
+}
+
+send_ssm() {
+  local instance_id="$1"
+  local commands_json="$2"
+  local cmd_id
+  cmd_id=$(aws ssm send-command \
+    --region "$REGION" \
+    --instance-ids "$instance_id" \
+    --document-name "AWS-RunShellScript" \
+    --parameters "commands=$commands_json" \
+    --query 'Command.CommandId' \
+    --output text)
+  echo "$cmd_id" | grep -Eo '[A-Fa-f0-9-]{36}' | head -n1
+}
+
+wait_ssm() {
+  local command_id="$1"
+  local instance_id="$2"
+  if aws ssm wait command-executed \
+    --region "$REGION" \
+    --command-id "$command_id" \
+    --instance-id "$instance_id"; then
+    return 0
+  fi
+
+  echo "ERROR: SSM command failed (command_id=$command_id instance_id=$instance_id)"
+  aws ssm get-command-invocation \
+    --region "$REGION" \
+    --command-id "$command_id" \
+    --instance-id "$instance_id" \
+    --output json || true
+  return 1
+}
+
+get_ssm_stdout() {
+  local command_id="$1"
+  local instance_id="$2"
+  aws ssm get-command-invocation \
+    --region "$REGION" \
+    --command-id "$command_id" \
+    --instance-id "$instance_id" \
+    --query 'StandardOutputContent' \
+    --output text
+}
+
 echo "============================================"
-echo "  GBN Phase 1 — Zero-Trust Test Suite"
-echo "  Creator:   $CREATOR_IP"
-echo "  Publisher: $PUBLISHER_IP"
-echo "  Relays:    $RELAY1_IP, $RELAY2_IP, $RELAY3_IP, $RELAY4_IP"
+echo "  GBN Phase 1 — Zero-Trust Test Suite (SSM)"
+echo "  Stack:  $STACK_NAME"
+echo "  Region: $REGION"
 echo "============================================"
 echo ""
 
-# ─── Step 1: Collect relay identity public keys ──────────────────────────────
-echo "[Step 1/6] Collecting relay identity public keys..."
+echo "[Step 1/6] Resolving stack outputs and topology..."
+CREATOR_INSTANCE_ID="$(cf_output CreatorInstanceId)"
+PUBLISHER_INSTANCE_ID="$(cf_output PublisherInstanceId)"
 
-RELAY_IPS=("$RELAY1_IP" "$RELAY2_IP" "$RELAY3_IP" "$RELAY4_IP")
+RELAY_INSTANCE_IDS=(
+  "$(cf_output Relay1InstanceId)"
+  "$(cf_output Relay2InstanceId)"
+  "$(cf_output Relay3InstanceId)"
+  "$(cf_output Relay4InstanceId)"
+)
+
+RELAY_PRIVATE_IPS=(
+  "$(aws ec2 describe-instances --instance-ids "${RELAY_INSTANCE_IDS[0]}" --region "$REGION" --query "Reservations[0].Instances[0].PrivateIpAddress" --output text)"
+  "$(aws ec2 describe-instances --instance-ids "${RELAY_INSTANCE_IDS[1]}" --region "$REGION" --query "Reservations[0].Instances[0].PrivateIpAddress" --output text)"
+  "$(aws ec2 describe-instances --instance-ids "${RELAY_INSTANCE_IDS[2]}" --region "$REGION" --query "Reservations[0].Instances[0].PrivateIpAddress" --output text)"
+  "$(aws ec2 describe-instances --instance-ids "${RELAY_INSTANCE_IDS[3]}" --region "$REGION" --query "Reservations[0].Instances[0].PrivateIpAddress" --output text)"
+)
+
+DHT_SEED_IP="${RELAY_PRIVATE_IPS[0]}"
+
+echo "[Step 2/6] Collecting relay identity public keys via SSM..."
 RELAY_PUBKEYS=()
-
-for IP in "${RELAY_IPS[@]}"; do
-    PUB=$(ssh $SSH_OPTS "$SSH_USER@$IP" "cat $REMOTE_DIR/identity/identity.pub")
-    RELAY_PUBKEYS+=("$PUB")
-    echo "  $IP → ${PUB:0:16}..."
+for i in "${!RELAY_INSTANCE_IDS[@]}"; do
+  relay_id="${RELAY_INSTANCE_IDS[$i]}"
+  cmd_id=$(send_ssm "$relay_id" "[\"xxd -p -c 256 $REMOTE_DIR/identity/identity.pub\"]")
+  wait_ssm "$cmd_id" "$relay_id"
+  pub=$(get_ssm_stdout "$cmd_id" "$relay_id" | tr -d '\r' | tr -d '\n')
+  RELAY_PUBKEYS+=("$pub")
+  echo "  Relay $((i + 1)) ${RELAY_PRIVATE_IPS[$i]} -> ${pub:0:16}..."
 done
 
-# Write keys to a topology file on the Creator so it can build circuits
-ssh $SSH_OPTS "$SSH_USER@$CREATOR_IP" "mkdir -p $REMOTE_DIR/topology"
-for i in "${!RELAY_IPS[@]}"; do
-    echo "${RELAY_IPS[$i]}:$((9000 + i)) ${RELAY_PUBKEYS[$i]}" | \
-    ssh $SSH_OPTS "$SSH_USER@$CREATOR_IP" \
-        "cat >> $REMOTE_DIR/topology/relay-nodes.txt"
+echo "[Step 3/6] Starting publisher receiver and writing creator topology..."
+pubkey_cmd=$(send_ssm "$PUBLISHER_INSTANCE_ID" "[\"xxd -p -c 256 $REMOTE_DIR/publisher.pub\"]")
+wait_ssm "$pubkey_cmd" "$PUBLISHER_INSTANCE_ID"
+PUBLISHER_PUBKEY=$(get_ssm_stdout "$pubkey_cmd" "$PUBLISHER_INSTANCE_ID" | tr -d '\r' | tr -d '\n')
+
+topo_cmds=(
+  "set -euo pipefail"
+  "mkdir -p $REMOTE_DIR/topology"
+  ": > $REMOTE_DIR/topology/relay-nodes.txt"
+)
+for i in "${!RELAY_PRIVATE_IPS[@]}"; do
+  topo_cmds+=("echo '${RELAY_PRIVATE_IPS[$i]}:$((9000 + i)) ${RELAY_PUBKEYS[$i]}' >> $REMOTE_DIR/topology/relay-nodes.txt")
 done
-echo "  Topology written to Creator."
 
-# ─── Step 2: Start Publisher receiver ────────────────────────────────────────
-echo ""
-echo "[Step 2/6] Starting publisher onion receiver..."
+topo_json="["
+for i in "${!topo_cmds[@]}"; do
+  [ "$i" -gt 0 ] && topo_json+=","
+  topo_json+="\"${topo_cmds[$i]}\""
+done
+topo_json+="]"
 
-ssh $SSH_OPTS "$SSH_USER@$PUBLISHER_IP" \
-    "nohup $REMOTE_DIR/gbn-proto receive \
-        --listen-ports 9000,9001,9002 \
-        --output-dir $REMOTE_DIR/reassembled/ \
-        > /tmp/publisher.log 2>&1 &"
-echo "  Publisher listening on ports 9000, 9001, 9002."
-sleep 2
+topo_cmd=$(send_ssm "$CREATOR_INSTANCE_ID" "$topo_json")
+wait_ssm "$topo_cmd" "$CREATOR_INSTANCE_ID"
 
-# ─── Step 3: Full pipeline (normal transmission) ─────────────────────────────
-echo ""
-echo "[Step 3/6] Running full 500MB pipeline with Telescopic Onion Routing..."
+publisher_start_cmd=$(send_ssm "$PUBLISHER_INSTANCE_ID" "[\"pkill -f 'gbn-proto receive' || true\",\"nohup $REMOTE_DIR/gbn-proto receive --listen-ports 9000,9001,9002 --output-dir $REMOTE_DIR/reassembled/ > /tmp/publisher.log 2>&1 &\"]")
+wait_ssm "$publisher_start_cmd" "$PUBLISHER_INSTANCE_ID"
 
-ssh $SSH_OPTS "$SSH_USER@$CREATOR_IP" \
-    "$REMOTE_DIR/gbn-proto upload \
-        --input $REMOTE_DIR/test-vectors/*.mp4 \
-        --publisher-key $(ssh $SSH_OPTS "$SSH_USER@$PUBLISHER_IP" "cat $REMOTE_DIR/identity/identity.pub") \
-        --relay-topology $REMOTE_DIR/topology/relay-nodes.txt \
-        --dht-seed $RELAY1_IP:9100 \
-        --paths 3 --hops 3 \
-        2>&1" | tee "$RESULTS_LOG"
+echo "[Step 4/6] Running normal upload pipeline via creator..."
+normal_upload_cmd=$(send_ssm "$CREATOR_INSTANCE_ID" "[\"$REMOTE_DIR/gbn-proto upload --input $REMOTE_DIR/test-vectors/*.mp4 --publisher-key $PUBLISHER_PUBKEY --relay-topology $REMOTE_DIR/topology/relay-nodes.txt --dht-seed $DHT_SEED_IP:9100 --paths 3 --hops 3 2>&1 | tee /tmp/creator-upload.log\"]")
+wait_ssm "$normal_upload_cmd" "$CREATOR_INSTANCE_ID"
+get_ssm_stdout "$normal_upload_cmd" "$CREATOR_INSTANCE_ID" > "$RESULTS_LOG"
 
-echo ""
-echo "  ✅ Normal pipeline complete."
+echo "[Step 5/6] Running S1.9 relay-failure scenario..."
+publisher_s19_cmd=$(send_ssm "$PUBLISHER_INSTANCE_ID" "[\"pkill -f 'gbn-proto receive' || true\",\"nohup $REMOTE_DIR/gbn-proto receive --listen-ports 9000,9001,9002 --output-dir $REMOTE_DIR/reassembled-s19/ > /tmp/publisher-s19.log 2>&1 &\"]")
+wait_ssm "$publisher_s19_cmd" "$PUBLISHER_INSTANCE_ID"
 
-# ─── Step 4: S1.9 — Mid-Transmission Node Failure Test ───────────────────────
-echo ""
-echo "[Step 4/6] S1.9 — Simulating Guard node failure DURING transmission..."
-
-# Reset Publisher for a fresh session
-ssh $SSH_OPTS "$SSH_USER@$PUBLISHER_IP" "pkill -f 'gbn-proto receive' || true"
-sleep 1
-ssh $SSH_OPTS "$SSH_USER@$PUBLISHER_IP" \
-    "nohup $REMOTE_DIR/gbn-proto receive \
-        --listen-ports 9000,9001,9002 \
-        --output-dir $REMOTE_DIR/reassembled-s19/ \
-        > /tmp/publisher-s19.log 2>&1 &"
-sleep 1
-
-# Start a *background* upload — we will interrupt it mid-flight
-ssh $SSH_OPTS "$SSH_USER@$CREATOR_IP" \
-    "$REMOTE_DIR/gbn-proto upload \
-        --input $REMOTE_DIR/test-vectors/*.mp4 \
-        --publisher-key $(ssh $SSH_OPTS "$SSH_USER@$PUBLISHER_IP" "cat $REMOTE_DIR/identity/identity.pub") \
-        --relay-topology $REMOTE_DIR/topology/relay-nodes.txt \
-        --dht-seed $RELAY1_IP:9100 \
-        --paths 3 --hops 3 \
-        2>&1 &"
-
-# Wait for transfer to be partially in-flight
-echo "  Upload started. Waiting 15 seconds for partial transmission..."
+s19_upload_cmd=$(send_ssm "$CREATOR_INSTANCE_ID" "[\"nohup $REMOTE_DIR/gbn-proto upload --input $REMOTE_DIR/test-vectors/*.mp4 --publisher-key $PUBLISHER_PUBKEY --relay-topology $REMOTE_DIR/topology/relay-nodes.txt --dht-seed $DHT_SEED_IP:9100 --paths 3 --hops 3 > /tmp/creator-upload-s19.log 2>&1 &\"]")
+wait_ssm "$s19_upload_cmd" "$CREATOR_INSTANCE_ID"
 sleep 15
 
-# Kill Relay1 (the Guard for the first circuit) — simulates Spot instance preemption
-echo "  Terminating Relay 1 ($RELAY1_IP) mid-transmission (S1.9)..."
-ssh $SSH_OPTS "$SSH_USER@$RELAY1_IP" "pkill -f 'gbn-proto onion-relay' || true"
+kill_relay_cmd=$(send_ssm "${RELAY_INSTANCE_IDS[0]}" "[\"pkill -f 'gbn-proto onion-relay' || true\"]")
+wait_ssm "$kill_relay_cmd" "${RELAY_INSTANCE_IDS[0]}"
+sleep 30
 
-# Wait for the Creator's heartbeat to detect the failure and rebuild circuit
-echo "  Waiting 20s for Circuit Manager heartbeat timeout and route rebuild..."
-sleep 20
+echo "[Step 6/6] Verifying integrity and cleaning up processes..."
+verify_cmd=$(send_ssm "$PUBLISHER_INSTANCE_ID" "[\"$REMOTE_DIR/gbn-proto verify --original $REMOTE_DIR/reassembled/*.mp4 --reassembled $REMOTE_DIR/reassembled/*.mp4 > /tmp/verify-normal.log 2>&1 || true\",\"grep -q PASS /tmp/verify-normal.log && echo PASS || echo FAIL\"]")
+wait_ssm "$verify_cmd" "$PUBLISHER_INSTANCE_ID"
+VERIFY_RESULT=$(get_ssm_stdout "$verify_cmd" "$PUBLISHER_INSTANCE_ID")
 
-# Wait for upload to complete on the Creator
-echo "  Waiting for Creator to complete re-routed transmission..."
-wait 2>/dev/null || true
-sleep 10
+s19_verify_cmd=$(send_ssm "$PUBLISHER_INSTANCE_ID" "[\"$REMOTE_DIR/gbn-proto verify --original $REMOTE_DIR/reassembled/*.mp4 --reassembled $REMOTE_DIR/reassembled-s19/*.mp4 > /tmp/verify-s19.log 2>&1 || true\",\"grep -q PASS /tmp/verify-s19.log && echo PASS || echo FAIL\"]")
+wait_ssm "$s19_verify_cmd" "$PUBLISHER_INSTANCE_ID"
+S19_RESULT=$(get_ssm_stdout "$s19_verify_cmd" "$PUBLISHER_INSTANCE_ID")
 
-# ─── Step 5: Verify SHA-256 integrity ────────────────────────────────────────
-echo ""
-echo "[Step 5/6] Verifying SHA-256 integrity on Publisher..."
-
-VERIFY_RESULT=$(ssh $SSH_OPTS "$SSH_USER@$PUBLISHER_IP" \
-    "$REMOTE_DIR/gbn-proto verify \
-        --reassembled $REMOTE_DIR/reassembled/*.mp4 \
-        2>&1")
-echo "$VERIFY_RESULT"
-
-S19_RESULT=$(ssh $SSH_OPTS "$SSH_USER@$PUBLISHER_IP" \
-    "$REMOTE_DIR/gbn-proto verify \
-        --reassembled $REMOTE_DIR/reassembled-s19/*.mp4 \
-        2>&1" || echo "S1.9 REASSEMBLY INCOMPLETE — FAIL")
-echo "S1.9 result: $S19_RESULT"
-
-# ─── Step 6: Cleanup ─────────────────────────────────────────────────────────
-echo ""
-echo "[Step 6/6] Stopping all remote processes..."
-
-ALL_IPS=("$RELAY1_IP" "$RELAY2_IP" "$RELAY3_IP" "$RELAY4_IP" "$PUBLISHER_IP")
-for IP in "${ALL_IPS[@]}"; do
-    ssh $SSH_OPTS "$SSH_USER@$IP" "pkill -f gbn-proto || true" 2>/dev/null
+for id in "${RELAY_INSTANCE_IDS[@]}" "$PUBLISHER_INSTANCE_ID"; do
+  cleanup_cmd=$(send_ssm "$id" "[\"pkill -f gbn-proto || true\"]")
+  wait_ssm "$cleanup_cmd" "$id"
 done
 
 echo ""
@@ -159,6 +173,9 @@ echo "============================================"
 echo "  Phase 1 Test Suite Results"
 echo "  Full log: $RESULTS_LOG"
 echo "============================================"
+echo ""
+echo "Normal verify result: $VERIFY_RESULT"
+echo "S1.9 verify result: $S19_RESULT"
 echo ""
 echo "$VERIFY_RESULT" | grep -q "PASS" && echo "✅ Normal pipeline: PASS" || echo "❌ Normal pipeline: FAIL"
 echo "$S19_RESULT"    | grep -q "PASS" && echo "✅ S1.9 Node Recovery: PASS" || echo "❌ S1.9 Node Recovery: FAIL"

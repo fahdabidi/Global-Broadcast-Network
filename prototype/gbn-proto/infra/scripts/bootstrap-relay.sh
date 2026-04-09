@@ -20,8 +20,13 @@ if [ -f "$KEY_DIR/identity.key" ]; then
     echo "Identity keypair already exists — skipping generation."
 else
     echo "Generating relay identity keypair..."
-    # Use the gbn-proto binary to generate a keypair (writes identity.key + identity.pub)
-    "$REMOTE_DIR/gbn-proto" keygen --out-dir "$KEY_DIR"
+    # Use the gbn-proto binary to generate a keypair in KEY_DIR, then rename for relay identity use
+    (
+        cd "$KEY_DIR"
+        "$REMOTE_DIR/gbn-proto" keygen
+        mv -f publisher.key identity.key
+        mv -f publisher.pub identity.pub
+    )
     echo "✅ Keypair generated:"
     echo "   Private: $KEY_DIR/identity.key  (never leaves this instance)"
     echo "   Public:  $KEY_DIR/identity.pub  (must be shared with Creator out-of-band)"

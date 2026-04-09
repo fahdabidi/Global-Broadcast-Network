@@ -1,84 +1,167 @@
 #!/usr/bin/env bash
-# deploy-relays.sh — Deploy the relay binary to all Relay EC2 instances.
+# deploy-relays.sh — Deploy relay binary/bootstrap script to all Relay EC2 instances via SSM.
 #
-# Usage: ./deploy-relays.sh <relay1-ip> <relay2-ip> <relay3-ip> <relay4-ip> <dht-seed-ip> [ssh-key-path]
-#
-# Each relay is started in 'onion-relay' mode. It:
-#   - Generates (or loads) a persistent Ed25519 identity keypair
-#   - Announces its signed RelayDescriptor to the Kademlia DHT
-#   - Listens for telescopic Noise_XX connections from the Creator
+# Usage: ./deploy-relays.sh <stack-name> [region]
 
 set -euo pipefail
+export AWS_PAGER=""
 
-if [ "$#" -lt 5 ]; then
-    echo "Usage: $0 <relay1-ip> <relay2-ip> <relay3-ip> <relay4-ip> <dht-seed-ip> [ssh-key-path]"
+if ! command -v aws >/dev/null 2>&1; then
+  if command -v aws.exe >/dev/null 2>&1; then
+    aws() { aws.exe "$@"; }
+  else
+    echo "ERROR: aws CLI not found in PATH (tried aws and aws.exe)."
     exit 1
+  fi
 fi
 
-RELAY1_IP="$1"
-RELAY2_IP="$2"
-RELAY3_IP="$3"
-RELAY4_IP="$4"
-DHT_SEED_IP="$5"          # First relay bootstraps the DHT; others peer off it
-SSH_KEY="${6:-~/.ssh/gbn-proto-key.pem}"
-SSH_USER="ec2-user"
-REMOTE_DIR="/home/$SSH_USER/gbn-proto"
+STACK_NAME="${1:?Usage: $0 <stack-name> [region]}"
+REGION="${2:-us-east-1}"
+REMOTE_DIR="/home/ec2-user/gbn-proto"
+POLL_TIMEOUT_SECONDS="${POLL_TIMEOUT_SECONDS:-900}"
+POLL_INTERVAL_SECONDS="${POLL_INTERVAL_SECONDS:-10}"
+
+cf_output() {
+  local key="$1"
+  aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" --output json | \
+    python -c "import json,sys; d=json.load(sys.stdin); o=d['Stacks'][0].get('Outputs',[]); print(next((x['OutputValue'] for x in o if x.get('OutputKey')=='$key'), ''))"
+}
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROTO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-BINARY="$PROTO_ROOT/target/x86_64-unknown-linux-gnu/release/gbn-proto"
+BOOTSTRAP_SCRIPT="$SCRIPT_DIR/bootstrap-relay.sh"
 
 echo "============================================"
-echo "  GBN Phase 1 — Deploy Relays"
+echo "  GBN Phase 1 — Deploy Relays (SSM)"
+echo "  Stack:  $STACK_NAME"
+echo "  Region: $REGION"
 echo "============================================"
 
-if [ ! -f "$BINARY" ]; then
-    echo "ERROR: Binary not found at $BINARY"
-    echo "Run deploy-creator.sh first (it builds the binary)."
-    exit 1
+echo "[1/5] Resolving stack outputs..."
+ARTIFACT_BUCKET="$(cf_output ArtifactBucketName)"
+
+RELAY_INSTANCE_IDS=(
+  "$(cf_output Relay1InstanceId)"
+  "$(cf_output Relay2InstanceId)"
+  "$(cf_output Relay3InstanceId)"
+  "$(cf_output Relay4InstanceId)"
+)
+
+RELAY_PRIVATE_IPS=(
+  "$(aws ec2 describe-instances --instance-ids "${RELAY_INSTANCE_IDS[0]}" --region "$REGION" --query "Reservations[0].Instances[0].PrivateIpAddress" --output text)"
+  "$(aws ec2 describe-instances --instance-ids "${RELAY_INSTANCE_IDS[1]}" --region "$REGION" --query "Reservations[0].Instances[0].PrivateIpAddress" --output text)"
+  "$(aws ec2 describe-instances --instance-ids "${RELAY_INSTANCE_IDS[2]}" --region "$REGION" --query "Reservations[0].Instances[0].PrivateIpAddress" --output text)"
+  "$(aws ec2 describe-instances --instance-ids "${RELAY_INSTANCE_IDS[3]}" --region "$REGION" --query "Reservations[0].Instances[0].PrivateIpAddress" --output text)"
+)
+
+if [ ! -f "$BOOTSTRAP_SCRIPT" ]; then
+  echo "ERROR: bootstrap script not found at $BOOTSTRAP_SCRIPT"
+  exit 1
 fi
 
-RELAY_IPS=("$RELAY1_IP" "$RELAY2_IP" "$RELAY3_IP" "$RELAY4_IP")
+echo "[2/5] Uploading relay artifacts to s3://$ARTIFACT_BUCKET/phase1-artifacts/..."
+cat "$BOOTSTRAP_SCRIPT" | aws s3 cp - "s3://$ARTIFACT_BUCKET/phase1-artifacts/bootstrap-relay.sh" --region "$REGION"
 
-for i in "${!RELAY_IPS[@]}"; do
-    IP="${RELAY_IPS[$i]}"
-    NUM=$((i + 1))
-    PORT=$((9000 + i))
-    echo "[Relay $NUM] Deploying to $IP (port $PORT)..."
+DHT_SEED_IP="${RELAY_PRIVATE_IPS[0]}"
 
-    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$SSH_USER@$IP" \
-        "mkdir -p $REMOTE_DIR"
+echo "[3/5] Deploying artifacts and starting relays via SSM..."
+for i in "${!RELAY_INSTANCE_IDS[@]}"; do
+  INSTANCE_ID="${RELAY_INSTANCE_IDS[$i]}"
+  RELAY_IP="${RELAY_PRIVATE_IPS[$i]}"
+  NUM=$((i + 1))
+  PORT=$((9000 + i))
+  SEED_ARG=""
+  if [ "$i" -ne 0 ]; then
+    SEED_ARG="--dht-seed $DHT_SEED_IP:9100"
+  fi
 
-    # Upload binary
-    scp -i "$SSH_KEY" -o StrictHostKeyChecking=no \
-        "$BINARY" \
-        "$SSH_USER@$IP:$REMOTE_DIR/"
+  echo "  [Relay $NUM] instance=$INSTANCE_ID ip=$RELAY_IP port=$PORT"
+  COMMAND_ID=$(aws ssm send-command \
+    --region "$REGION" \
+    --instance-ids "$INSTANCE_ID" \
+    --document-name "AWS-RunShellScript" \
+    --comment "GBN Phase1 deploy/start relay $NUM" \
+    --parameters commands="[
+      \"set -euo pipefail\",
+      \"mkdir -p /home/ec2-user/gbn-proto\",
+      \"aws s3 cp s3://$ARTIFACT_BUCKET/phase1-artifacts/gbn-proto /home/ec2-user/gbn-proto/gbn-proto\",
+      \"chmod +x /home/ec2-user/gbn-proto/gbn-proto\",
+      \"aws s3 cp s3://$ARTIFACT_BUCKET/phase1-artifacts/bootstrap-relay.sh /home/ec2-user/gbn-proto/bootstrap-relay.sh\",
+      \"chmod +x /home/ec2-user/gbn-proto/bootstrap-relay.sh\",
+      \"bash /home/ec2-user/gbn-proto/bootstrap-relay.sh\",
+      \"pkill -f 'gbn-proto onion-relay' || true\",
+      \"nohup /home/ec2-user/gbn-proto/gbn-proto onion-relay --identity /home/ec2-user/gbn-proto/identity/identity.key --listen 0.0.0.0:$PORT --dht-listen 0.0.0.0:9100 $SEED_ARG > /tmp/relay-$PORT.log 2>&1 &\"
+    ]" \
+    --query 'Command.CommandId' \
+    --output text)
+  COMMAND_ID="$(echo "$COMMAND_ID" | grep -Eo '[A-Fa-f0-9-]{36}' | head -n1)"
+  if [ -z "$COMMAND_ID" ]; then
+    echo "ERROR: Failed to parse SSM CommandId for relay $NUM"
+    exit 1
+  fi
+  echo "    command-id=$COMMAND_ID"
 
-    # Upload and run bootstrap to generate identity keypair
-    scp -i "$SSH_KEY" -o StrictHostKeyChecking=no \
-        "$(dirname "$0")/bootstrap-relay.sh" \
-        "$SSH_USER@$IP:$REMOTE_DIR/"
-    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$SSH_USER@$IP" \
-        "bash $REMOTE_DIR/bootstrap-relay.sh"
+  start_ts=$(date +%s)
+  while true; do
+    STATUS_RAW="$(aws ssm get-command-invocation \
+      --region "$REGION" \
+      --command-id "$COMMAND_ID" \
+      --instance-id "$INSTANCE_ID" \
+      --query 'Status' \
+      --output text 2>/dev/null || true)"
+    STATUS="$(printf '%s\n' "$STATUS_RAW" | tr -d '\r' | head -n1 | awk '{print $1}')"
 
-    # Start onion relay: loads identity.key, joins DHT via seed, listens on port
-    SEED_ARG=""
-    if [ "$IP" != "$DHT_SEED_IP" ]; then
-        SEED_ARG="--dht-seed $DHT_SEED_IP:9100"
-    fi
-
-    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$SSH_USER@$IP" \
-        "nohup $REMOTE_DIR/gbn-proto onion-relay \
-            --identity $REMOTE_DIR/identity/identity.key \
-            --listen 0.0.0.0:$PORT \
-            --dht-listen 0.0.0.0:9100 \
-            $SEED_ARG \
-            > /tmp/relay-$PORT.log 2>&1 &"
-
-    echo "[Relay $NUM] ✅ Started on port $PORT (DHT on 9100)."
+    case "$STATUS" in
+      Success)
+        break
+        ;;
+      Failed|Cancelled|TimedOut|Cancelling)
+        echo "ERROR: Relay $NUM SSM command failed with status: $STATUS"
+        aws ssm get-command-invocation \
+          --region "$REGION" \
+          --command-id "$COMMAND_ID" \
+          --instance-id "$INSTANCE_ID" \
+          --output json || true
+        exit 1
+        ;;
+      Pending|InProgress|Delayed|"")
+        now_ts=$(date +%s)
+        elapsed=$((now_ts - start_ts))
+        if [ "$elapsed" -ge "$POLL_TIMEOUT_SECONDS" ]; then
+          echo "ERROR: Timed out waiting for relay $NUM after ${elapsed}s"
+          aws ssm get-command-invocation \
+            --region "$REGION" \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --output json || true
+          exit 1
+        fi
+        sleep "$POLL_INTERVAL_SECONDS"
+        ;;
+      *)
+        echo "ERROR: Relay $NUM unknown SSM status: $STATUS"
+        aws ssm get-command-invocation \
+          --region "$REGION" \
+          --command-id "$COMMAND_ID" \
+          --instance-id "$INSTANCE_ID" \
+          --output json || true
+        exit 1
+        ;;
+    esac
+  done
 done
 
+echo "[4/5] Persisting relay private-IP topology file locally..."
+TOPOLOGY_FILE="$PROTO_ROOT/infra/scripts/.relay-topology"
+{
+  for i in "${!RELAY_PRIVATE_IPS[@]}"; do
+    echo "${RELAY_PRIVATE_IPS[$i]}:$((9000 + i))"
+  done
+} > "$TOPOLOGY_FILE"
+
+echo "[5/5] Relay deployment complete."
+
 echo ""
-echo "✅ All 4 relay instances deployed as Onion Relays."
-echo "   Relay public keys are in /home/ec2-user/gbn-proto/identity/identity.pub on each host."
-echo "   Collect them and pass to the Creator for circuit validation."
+echo "✅ All 4 relay instances deployed as Onion Relays (SSM)."
+echo "   DHT seed private IP: $DHT_SEED_IP"
+echo "   Local topology hint file: $TOPOLOGY_FILE"
