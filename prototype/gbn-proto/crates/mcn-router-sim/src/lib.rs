@@ -8,8 +8,11 @@
 //!   round-robin to simulate multipath routing.
 
 pub mod swarm;
+pub mod gossip;
 pub mod relay_engine;
 pub mod circuit_manager;
+
+pub use gossip::{GossipRequest, PlumTreeBehaviour};
 
 use std::{
     net::SocketAddr,

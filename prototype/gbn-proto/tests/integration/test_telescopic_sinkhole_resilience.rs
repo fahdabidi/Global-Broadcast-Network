@@ -72,14 +72,17 @@ async fn test_s1_6_sinkhole_guard_is_rejected() {
     let sinkhole_guard = RelayNode {
         addr: sinkhole_addr,
         identity_pub: [0x99u8; 32], // arbitrary — won't match real handshake
+        subnet_tag: "HostileSubnet".into(),
     };
     let middle = RelayNode {
         addr: middle_addr,
         identity_pub: middle_pub,
+        subnet_tag: "HostileSubnet".into(),
     };
     let exit = RelayNode {
         addr: exit_addr,
         identity_pub: exit_pub,
+        subnet_tag: "FreeSubnet".into(),
     };
 
     let result = tokio::time::timeout(

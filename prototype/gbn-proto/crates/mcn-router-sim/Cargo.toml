@@ -18,6 +18,8 @@ serde_json = { workspace = true }
 libp2p = { workspace = true }
 snow = { workspace = true }
 ed25519-dalek = { workspace = true }
+aws-config = { workspace = true }
+aws-sdk-servicediscovery = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

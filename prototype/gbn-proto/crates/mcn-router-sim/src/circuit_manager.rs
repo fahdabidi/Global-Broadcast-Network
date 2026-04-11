@@ -23,7 +23,7 @@ use gbn_protocol::onion::{
 };
 use mcn_crypto::noise::{build_initiator, complete_handshake, encrypt_frame};
 use std::{
-    collections::{HashSet},
+    collections::{HashMap, HashSet},
     net::SocketAddr,
     sync::Arc,
     time::Duration,
@@ -46,6 +46,7 @@ pub type ChunkBytes = Vec<u8>;
 pub struct RelayNode {
     pub addr: SocketAddr,
     pub identity_pub: [u8; 32],
+    pub subnet_tag: String,
 }
 
 /// A fully built Telescopic Circuit: Guard → Middle → Exit.
@@ -194,6 +195,7 @@ pub struct CircuitManager {
     /// Channel the heartbeat watchdog uses to signal a dead circuit.
     failure_tx: mpsc::Sender<usize>,
     failure_rx: Arc<Mutex<mpsc::Receiver<usize>>>,
+    retry_counts: Arc<Mutex<HashMap<u32, u8>>>,
 }
 
 impl CircuitManager {
@@ -205,6 +207,7 @@ impl CircuitManager {
             used_guards: Arc::new(Mutex::new(HashSet::new())),
             failure_tx,
             failure_rx: Arc::new(Mutex::new(failure_rx)),
+            retry_counts: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -279,13 +282,167 @@ impl CircuitManager {
     pub async fn drain_failures(&self) -> Vec<(u32, ChunkBytes)> {
         let mut requeued = Vec::new();
         let mut rx = self.failure_rx.lock().await;
+        let mut dead = Vec::new();
 
         while let Ok(dead_idx) = rx.try_recv() {
             tracing::warn!("Circuit {} declared dead — collecting in-flight chunks", dead_idx);
+            dead.push(dead_idx);
+        }
+
+        if !dead.is_empty() {
+            dead.sort_unstable();
+            dead.dedup();
+            dead.reverse();
+            let mut circuits = self.circuits.lock().await;
+            for idx in dead {
+                if idx < circuits.len() {
+                    circuits.swap_remove(idx);
+                }
+            }
+            drop(circuits);
+
             let mut q = self.inflight_queue.lock().await;
             requeued.extend(q.drain(..));
         }
         requeued
+    }
+
+    pub async fn process_failures_with_rebuild(
+        &self,
+        creator_priv_key: &[u8; 32],
+        all_peers: &[RelayNode],
+        exit_candidates: &[RelayNode],
+    ) -> Result<usize> {
+        let requeued = self.drain_failures().await;
+        if requeued.is_empty() {
+            return Ok(0);
+        }
+
+        let used = self.used_guards.lock().await.clone();
+        let guard_pool: Vec<_> = all_peers
+            .iter()
+            .filter(|p| !used.contains(&p.addr))
+            .cloned()
+            .collect();
+
+        if guard_pool.is_empty() {
+            anyhow::bail!("No disjoint guards available for rebuild");
+        }
+
+        let guard = &guard_pool[0];
+        let middle = all_peers
+            .iter()
+            .find(|p| p.addr != guard.addr)
+            .cloned()
+            .context("No middle peer available for rebuild")?;
+        let exit = exit_candidates
+            .iter()
+            .find(|p| p.addr != guard.addr && p.addr != middle.addr)
+            .cloned()
+            .context("No exit candidate available for rebuild")?;
+
+        let circuit = build_circuit(creator_priv_key, guard, &middle, &exit).await?;
+        self.add_circuit(circuit).await;
+
+        let mut resent = 0usize;
+        for (chunk_idx, payload) in requeued {
+            let should_send = {
+                let mut retries = self.retry_counts.lock().await;
+                let count = retries.entry(chunk_idx).or_insert(0);
+                if *count >= 3 {
+                    false
+                } else {
+                    *count += 1;
+                    true
+                }
+            };
+
+            if should_send && self.send_chunk(chunk_idx, payload).await.is_ok() {
+                resent += 1;
+            }
+        }
+        Ok(resent)
+    }
+}
+
+pub fn select_exit_candidates(all_peers: &[RelayNode]) -> Vec<RelayNode> {
+    all_peers
+        .iter()
+        .filter(|p| p.subnet_tag == "FreeSubnet")
+        .cloned()
+        .collect()
+}
+
+pub async fn build_circuits_speculative(
+    creator_priv_key: &[u8; 32],
+    all_peers: &[RelayNode],
+    exit_candidates: &[RelayNode],
+    target_count: usize,
+    max_concurrent: usize,
+) -> Result<Vec<OnionCircuit>> {
+    use tokio::task::JoinSet;
+
+    if target_count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut launched = 0usize;
+    let mut joins = JoinSet::new();
+    'outer: for guard in all_peers {
+        for middle in all_peers {
+            if middle.addr == guard.addr {
+                continue;
+            }
+            for exit in exit_candidates {
+                if exit.addr == guard.addr || exit.addr == middle.addr {
+                    continue;
+                }
+                let guard = guard.clone();
+                let middle = middle.clone();
+                let exit = exit.clone();
+                let key = *creator_priv_key;
+                joins.spawn(async move { build_circuit(&key, &guard, &middle, &exit).await });
+                launched += 1;
+                if launched >= max_concurrent {
+                    break 'outer;
+                }
+            }
+        }
+    }
+
+    let mut winners = Vec::new();
+    let mut used_guards = HashSet::new();
+    while let Some(joined) = joins.join_next().await {
+        if let Ok(Ok(c)) = joined {
+            if used_guards.insert(c.guard_addr) {
+                winners.push(c);
+                if winners.len() >= target_count {
+                    break;
+                }
+            }
+        }
+    }
+    if winners.is_empty() {
+        anyhow::bail!("No speculative circuits succeeded");
+    }
+    Ok(winners)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn free_subnet_filter_works() {
+        let mk = |tag: &str, port: u16| RelayNode {
+            addr: format!("127.0.0.1:{}", port).parse().unwrap(),
+            identity_pub: [0u8; 32],
+            subnet_tag: tag.to_string(),
+        };
+        let peers = vec![mk("HostileSubnet", 1), mk("FreeSubnet", 2), mk("FreeSubnet", 3)];
+        let exits = select_exit_candidates(&peers);
+        assert_eq!(exits.len(), 2);
+        assert!(exits.iter().all(|p| p.subnet_tag == "FreeSubnet"));
     }
 }
 

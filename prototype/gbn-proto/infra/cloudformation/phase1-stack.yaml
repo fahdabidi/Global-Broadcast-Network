@@ -141,6 +141,27 @@ Resources:
         - Key: Name
           Value: gbn-proto-relay-sg
 
+  CloudMapNamespace:
+    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+    Properties:
+      Name: gbn.local
+      Description: Private DNS namespace for GBN relay peer discovery
+      Vpc: !Ref VPC
+
+  RelayDiscoveryService:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: relay
+      Description: Cloud Map service for relay task discovery
+      NamespaceId: !Ref CloudMapNamespace
+      DnsConfig:
+        RoutingPolicy: MULTIVALUE
+        DnsRecords:
+          - Type: A
+            TTL: 30
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
   Phase1InstanceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -386,6 +407,18 @@ Outputs:
   PublisherPrivateIP:
     Description: Private IP of the Publisher instance
     Value: !GetAtt PublisherInstance.PrivateIp
+
+  CloudMapNamespaceId:
+    Description: Cloud Map namespace ID for relay discovery
+    Value: !Ref CloudMapNamespace
+
+  CloudMapNamespaceName:
+    Description: Cloud Map namespace DNS name
+    Value: gbn.local
+
+  RelayDiscoveryServiceId:
+    Description: Cloud Map service ID for relays
+    Value: !Ref RelayDiscoveryService
 
   EstimatedCost:
     Description: Estimated hourly cost (Spot pricing varies)

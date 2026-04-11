@@ -30,10 +30,14 @@ rand = "0.8"
 snow = "0.9"
 
 # Peer-to-Peer
-libp2p = { version = "0.52", features = ["tokio", "kad", "tcp", "noise", "yamux", "macros"] }
+libp2p = { version = "0.52", features = ["tokio", "kad", "tcp", "noise", "yamux", "macros", "request-response", "cbor"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+
+# AWS SDK
+aws-config = "1"
+aws-sdk-servicediscovery = "1"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

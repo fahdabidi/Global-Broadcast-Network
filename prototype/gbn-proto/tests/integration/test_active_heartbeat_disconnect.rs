@@ -58,9 +58,9 @@ async fn test_s1_9_heartbeat_fallback_recovers_inflight_chunks() {
     let (exit_addr, exit_pub) = make_relay([0x03u8; 32]).await;
     let _sink = spawn_sink().await;
 
-    let guard1 = RelayNode { addr: guard1_addr, identity_pub: guard1_pub };
-    let middle = RelayNode { addr: middle_addr, identity_pub: middle_pub };
-    let exit   = RelayNode { addr: exit_addr,   identity_pub: exit_pub };
+    let guard1 = RelayNode { addr: guard1_addr, identity_pub: guard1_pub, subnet_tag: "HostileSubnet".into() };
+    let middle = RelayNode { addr: middle_addr, identity_pub: middle_pub, subnet_tag: "HostileSubnet".into() };
+    let exit   = RelayNode { addr: exit_addr,   identity_pub: exit_pub, subnet_tag: "FreeSubnet".into() };
 
     let circuit1 = build_circuit(&creator_key, &guard1, &middle, &exit)
         .await
@@ -98,7 +98,7 @@ async fn test_s1_9_heartbeat_fallback_recovers_inflight_chunks() {
 
     // ── Build a REPLACEMENT circuit with a DISJOINT guard ─────────────────
     let (guard2_addr, guard2_pub) = make_relay([0x04u8; 32]).await; // different key → disjoint
-    let guard2 = RelayNode { addr: guard2_addr, identity_pub: guard2_pub };
+    let guard2 = RelayNode { addr: guard2_addr, identity_pub: guard2_pub, subnet_tag: "HostileSubnet".into() };
 
     assert_ne!(
         guard2_addr, guard1_addr,
