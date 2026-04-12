@@ -6,8 +6,10 @@
 set -euo pipefail
 export AWS_PAGER=""
 
+is_aws_exe_fallback="false"
 if ! command -v aws >/dev/null 2>&1; then
   if command -v aws.exe >/dev/null 2>&1; then
+    is_aws_exe_fallback="true"
     aws() { aws.exe "$@"; }
   else
     echo "ERROR: aws CLI not found in PATH (tried aws and aws.exe)."
@@ -24,6 +26,11 @@ POLL_TIMEOUT_SECONDS="${POLL_TIMEOUT_SECONDS:-600}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROTO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TEMPLATE_PATH="$PROTO_ROOT/infra/cloudformation/phase1-scale-stack.yaml"
+
+# aws.exe cannot resolve WSL /mnt/* paths for --template-file; convert when needed.
+if [ "$is_aws_exe_fallback" = "true" ] && command -v wslpath >/dev/null 2>&1; then
+  TEMPLATE_PATH="$(wslpath -w "$TEMPLATE_PATH")"
+fi
 
 cf_resource_id() {
   local logical_id="$1"

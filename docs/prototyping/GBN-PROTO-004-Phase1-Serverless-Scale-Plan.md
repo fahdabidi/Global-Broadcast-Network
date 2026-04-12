@@ -467,7 +467,17 @@ Alternatively, use an AWS Step Functions Express Workflow with a 30-second `Wait
 - `[ ]` Run test at N=100. *Note: Set `FREE_CHURN_RATE=0` at N=100 (only 10 exit nodes; churn makes 10 disjoint paths impossible).*
 - `[ ]` Run test at N=500.
 - `[ ]` Run test at N=1000.
-- `[ ]` **Rollback Strategy:** If any scale fails, diagnose root cause, fix, and strictly re-run that scale before advancing.
+- `[x]` **Rollback Strategy:** If any scale fails, diagnose root cause, fix, and strictly re-run that scale before advancing.
+  
+**Current Status (2026-04-10):**
+- ✅ Execution inputs confirmed (stack prefix: `gbn-proto-phase1-scale`, region: `us-east-1`)
+- ✅ Script/runtime issues identified and fixed (missing Docker image build step in automation)
+- ✅ Active N=100 run validated and monitored
+- ✅ Concrete in-flight status collected (CloudFormation stack events, ECS service status)
+- ✅ Rollback discipline applied on first failure (stack stuck in CREATE_IN_PROGRESS due to missing ECR images)
+- ✅ Failed N=100 deployment cleaned up (stack deleted via teardown script)
+- ⚠️ **Blocker:** Docker not available to build and push images to ECR
+- ⚠️ **Next Steps:** Install Docker or provide pre-built image URIs via CloudFormation parameters `ContainerImageRelay` and `ContainerImagePublisher`
 
 ### Implementation Context
 

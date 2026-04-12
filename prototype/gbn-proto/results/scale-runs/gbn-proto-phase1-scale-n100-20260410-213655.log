@@ -1,0 +1,44 @@
+============================================
+  Step 10 Execution — Scale N=100
+  Stack: gbn-proto-phase1-scale-n100
+  Region: us-east-1
+============================================
+[A] Deploy + stabilize + scale-up
+============================================
+  GBN Phase 1 — Deploy Scale Test
+  Stack:  gbn-proto-phase1-scale-n100
+  Scale:  100
+  Region: us-east-1
+============================================
+[1/5] Deploying CloudFormation stack...
+
+aws: [ERROR]: Invalid template path /mnt/c/Users/fahd_/OneDrive/Documents/Global Broadcast Network/prototype/gbn-proto/infra/cloudformation/phase1-scale-stack.yaml
+[B] N=100 special case: setting FREE_CHURN_RATE=0.0
+[C] Enable chaos + trigger upload
+============================================
+  GBN Phase 1 — Run Chaos Upload
+  Stack:  gbn-proto-phase1-scale-n100
+  Region: us-east-1
+============================================
+[1/5] Resolving stack resource IDs...
+
+aws: [ERROR]: An error occurred (ValidationError) when calling the DescribeStackResources operation: Stack with id gbn-proto-phase1-scale-n100 does not exist
+[D] Teardown + metrics export
+============================================
+  GBN Phase 1 — Teardown Scale Test
+  Stack:  gbn-proto-phase1-scale-n100
+  Region: us-east-1
+============================================
+[1/4] Disabling chaos rule (if present)...
+  Chaos rule not found (already removed or stack not active).
+[2/4] Dumping CloudWatch metrics...
+  Metrics saved: /mnt/c/Users/fahd_/OneDrive/Documents/Global Broadcast Network/prototype/gbn-proto/results/scale-gbn-proto-phase1-scale-n100-20260410-213706-metrics.json
+[3/4] Scaling ECS services to 0 (fast cost cutoff)...
+  Cluster not found; skipping ECS scale-down.
+[4/4] Deleting CloudFormation stack...
+  Waiting for stack delete completion...
+
+✅ Scale test stack teardown complete.
+   Stack:   gbn-proto-phase1-scale-n100
+   Metrics: /mnt/c/Users/fahd_/OneDrive/Documents/Global Broadcast Network/prototype/gbn-proto/results/scale-gbn-proto-phase1-scale-n100-20260410-213706-metrics.json
+✅ Scale N=100 run completed successfully.

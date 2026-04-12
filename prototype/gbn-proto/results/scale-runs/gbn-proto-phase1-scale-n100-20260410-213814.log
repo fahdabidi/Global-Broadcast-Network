@@ -1,0 +1,16 @@
+============================================
+  Step 10 Execution — Scale N=100
+  Stack: gbn-proto-phase1-scale-n100
+  Region: us-east-1
+============================================
+[A] Deploy + stabilize + scale-up
+============================================
+  GBN Phase 1 — Deploy Scale Test
+  Stack:  gbn-proto-phase1-scale-n100
+  Scale:  100
+  Region: us-east-1
+============================================
+[1/5] Deploying CloudFormation stack...
+
+Waiting for changeset to be created..
+Waiting for stack create/update to complete
