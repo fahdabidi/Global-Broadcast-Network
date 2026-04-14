@@ -49,7 +49,16 @@ PUBLISHER_SERVICE_NAME="$(cf_resource_id PublisherService)"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 METRICS_FILE="$RESULTS_DIR/scale-${STACK_NAME}-${TIMESTAMP}-metrics.json"
 
-echo "[1/4] Disabling chaos rule (if present)..."
+# Derive numeric scale from stack name suffix (e.g. gbn-proto-phase1-scale-n100 → 100).
+# Used to scope CloudWatch SEARCH to the current run and avoid MaxMetricsExceeded from
+# the 700+ accumulated NodeId series across all historical runs.
+SCALE_HINT="$(echo "$STACK_NAME" | grep -oE 'n[0-9]+$' | tr -d 'n' || true)"
+SCALE_FILTER=""
+if [ -n "$SCALE_HINT" ]; then
+  SCALE_FILTER=" Scale=\\\"${SCALE_HINT}\\\""
+fi
+
+echo "[1/5] Disabling chaos rule (if present)..."
 if [ -n "$CHAOS_RULE_NAME" ] && [ "$CHAOS_RULE_NAME" != "None" ]; then
   aws events disable-rule --name "$CHAOS_RULE_NAME" --region "$REGION" || true
   echo "  Chaos disabled: $CHAOS_RULE_NAME"
@@ -57,7 +66,7 @@ else
   echo "  Chaos rule not found (already removed or stack not active)."
 fi
 
-echo "[2/4] Dumping CloudWatch metrics..."
+echo "[2/5] Dumping CloudWatch metrics..."
 END_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || python - <<'PY'
 from datetime import datetime, timezone
 print(datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))
@@ -69,22 +78,71 @@ print((datetime.now(timezone.utc) - timedelta(hours=4)).strftime('%Y-%m-%dT%H:%M
 PY
 )"
 
-aws cloudwatch get-metric-data \
-  --region "$REGION" \
-  --start-time "$START_TIME" \
-  --end-time "$END_TIME" \
-  --scan-by TimestampAscending \
-  --metric-data-queries '[
-    {"Id":"bootstrap","Expression":"SUM(SEARCH('"'"'{GBN/ScaleTest,Scale,Subnet,NodeId} MetricName=\"BootstrapResult\"'"'"', '"'"'Sum'"'"', 60))","ReturnData":true},
-    {"Id":"gossipbw","Expression":"SUM(SEARCH('"'"'{GBN/ScaleTest,Scale,Subnet,NodeId} MetricName=\"GossipBandwidthBytes\"'"'"', '"'"'Sum'"'"', 60))","ReturnData":true},
-    {"Id":"circuit","Expression":"SUM(SEARCH('"'"'{GBN/ScaleTest,Scale,Subnet,NodeId} MetricName=\"CircuitBuildResult\"'"'"', '"'"'Sum'"'"', 60))","ReturnData":true},
-    {"Id":"chunks","Expression":"SUM(SEARCH('"'"'{GBN/ScaleTest,Scale,Subnet,NodeId} MetricName=\"ChunksDelivered\"'"'"', '"'"'Sum'"'"', 60))","ReturnData":true}
-  ]' \
-  --output json > "$METRICS_FILE"
+# Issue separate get-metric-data calls per metric to avoid MaxMetricsExceeded from
+# combined SEARCH expressions (four queries × 400+ series per query exceeds the 500 limit).
+#
+# cw_query        — searches {Scale,Subnet,NodeId} dimension group (per-node metrics)
+# cw_query_agg    — searches {Scale,Subnet} dimension group only (aggregate metrics)
+#
+# GossipBandwidthBytes is published WITHOUT NodeId (aggregate) so its SEARCH spec must
+# also omit NodeId.  After 5 × N=100 runs the per-NodeId series count reached 500 and
+# the SEARCH returned only stale series, reporting 0 bytes every run.
+cw_query() {
+  local metric_name="$1" stat="$2"
+  aws cloudwatch get-metric-data \
+    --region "$REGION" \
+    --start-time "$START_TIME" \
+    --end-time "$END_TIME" \
+    --scan-by TimestampAscending \
+    --metric-data-queries "[{\"Id\":\"m\",\"Expression\":\"SUM(SEARCH('{GBN/ScaleTest,Scale,Subnet,NodeId}${SCALE_FILTER} MetricName=\\\"${metric_name}\\\"', '${stat}', 60))\",\"ReturnData\":true,\"Label\":\"${metric_name}\"}]" \
+    --output json 2>/dev/null || echo '{"MetricDataResults":[]}'
+}
+
+cw_query_agg() {
+  local metric_name="$1" stat="$2"
+  aws cloudwatch get-metric-data \
+    --region "$REGION" \
+    --start-time "$START_TIME" \
+    --end-time "$END_TIME" \
+    --scan-by TimestampAscending \
+    --metric-data-queries "[{\"Id\":\"m\",\"Expression\":\"SUM(SEARCH('{GBN/ScaleTest,Scale,Subnet}${SCALE_FILTER} MetricName=\\\"${metric_name}\\\"', '${stat}', 60))\",\"ReturnData\":true,\"Label\":\"${metric_name}\"}]" \
+    --output json 2>/dev/null || echo '{"MetricDataResults":[]}'
+}
+
+export BOOT_JSON="$(cw_query BootstrapResult Sum)"
+export GOSS_JSON="$(cw_query_agg GossipBandwidthBytes Sum)"
+export CIRC_JSON="$(cw_query CircuitBuildResult Sum)"
+export CHUNK_JSON="$(cw_query ChunksDelivered Sum)"
+
+python3 - <<'PYEOF' > "$METRICS_FILE"
+import json, os
+
+def load(env_key):
+    raw = os.environ.get(env_key, '{}')
+    try:
+        d = json.loads(raw)
+        return d.get("MetricDataResults", [{}])
+    except Exception:
+        return [{}]
+
+results = []
+for label, env_key in [
+    ("bootstrap", "BOOT_JSON"),
+    ("gossipbw",  "GOSS_JSON"),
+    ("circuit",   "CIRC_JSON"),
+    ("chunks",    "CHUNK_JSON"),
+]:
+    r = dict(load(env_key)[0]) if load(env_key) else {}
+    r["Id"]    = label
+    r["Label"] = label
+    results.append(r)
+
+print(json.dumps({"MetricDataResults": results}, indent=4))
+PYEOF
 
 echo "  Metrics saved: $METRICS_FILE"
 
-echo "[3/4] Scaling ECS services to 0 (fast cost cutoff)..."
+echo "[3/5] Scaling ECS services to 0 (fast cost cutoff)..."
 if [ -n "$CLUSTER_NAME" ] && [ "$CLUSTER_NAME" != "None" ]; then
   for svc in "$HOSTILE_SERVICE_NAME" "$FREE_SERVICE_NAME" "$CREATOR_SERVICE_NAME" "$PUBLISHER_SERVICE_NAME"; do
     if [ -n "$svc" ] && [ "$svc" != "None" ]; then
@@ -96,7 +154,22 @@ else
   echo "  Cluster not found; skipping ECS scale-down."
 fi
 
-echo "[4/4] Deleting CloudFormation stack..."
+echo "[4/4] Emptying ECR repositories before stack deletion..."
+ECR_RELAY_REPO="$(cf_resource_id EcrRepositoryRelay)"
+ECR_PUB_REPO="$(cf_resource_id EcrRepositoryPublisher)"
+for repo in "$ECR_RELAY_REPO" "$ECR_PUB_REPO"; do
+  if [ -n "$repo" ] && [ "$repo" != "None" ]; then
+    image_ids="$(aws ecr list-images --repository-name "$repo" --region "$REGION" --query 'imageIds' --output json 2>/dev/null || echo '[]')"
+    if [ "$image_ids" != "[]" ] && [ "$image_ids" != "" ]; then
+      aws ecr batch-delete-image --repository-name "$repo" --region "$REGION" --image-ids "$image_ids" >/dev/null 2>&1 || true
+      echo "  Emptied ECR repo: $repo"
+    else
+      echo "  ECR repo already empty: $repo"
+    fi
+  fi
+done
+
+echo "[5/5] Deleting CloudFormation stack..."
 aws cloudformation delete-stack --stack-name "$STACK_NAME" --region "$REGION"
 echo "  Waiting for stack delete completion..."
 aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" --region "$REGION"

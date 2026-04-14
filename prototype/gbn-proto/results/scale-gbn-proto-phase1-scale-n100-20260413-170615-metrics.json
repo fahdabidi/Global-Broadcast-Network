@@ -1,0 +1,76 @@
+{
+    "MetricDataResults": [
+        {
+            "Id": "circuit",
+            "Label": "circuit",
+            "Timestamps": [],
+            "Values": [],
+            "StatusCode": "Complete"
+        },
+        {
+            "Id": "chunks",
+            "Label": "chunks",
+            "Timestamps": [],
+            "Values": [],
+            "StatusCode": "Complete"
+        },
+        {
+            "Id": "gossipbw",
+            "Label": "gossipbw",
+            "Timestamps": [],
+            "Values": [],
+            "StatusCode": "Complete"
+        },
+        {
+            "Id": "bootstrap",
+            "Label": "bootstrap",
+            "Timestamps": [
+                "2026-04-13T13:31:00-07:00",
+                "2026-04-13T13:32:00-07:00",
+                "2026-04-13T13:33:00-07:00",
+                "2026-04-13T13:34:00-07:00",
+                "2026-04-13T13:35:00-07:00",
+                "2026-04-13T13:36:00-07:00",
+                "2026-04-13T13:42:00-07:00",
+                "2026-04-13T13:43:00-07:00",
+                "2026-04-13T13:44:00-07:00",
+                "2026-04-13T13:45:00-07:00",
+                "2026-04-13T13:46:00-07:00",
+                "2026-04-13T13:47:00-07:00",
+                "2026-04-13T16:40:00-07:00",
+                "2026-04-13T17:03:00-07:00",
+                "2026-04-13T17:04:00-07:00"
+            ],
+            "Values": [
+                99.0,
+                1.0,
+                60.0,
+                14.0,
+                50.0,
+                11.0,
+                67.0,
+                50.0,
+                20.0,
+                23.0,
+                42.0,
+                41.0,
+                0.0,
+                0.0,
+                0.0
+            ],
+            "StatusCode": "PartialData",
+            "Messages": [
+                {
+                    "Code": "PartialData",
+                    "Value": "The expression may contain partial data as one or more metrics have StatusCode 'Paginated'"
+                }
+            ]
+        }
+    ],
+    "Messages": [
+        {
+            "Code": "MaxMetricsExceeded",
+            "Value": "Maximum number of allowed metrics exceeded"
+        }
+    ]
+}

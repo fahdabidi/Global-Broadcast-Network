@@ -1,0 +1,13 @@
+target/
+results/
+.git/
+.github/
+**/*.log
+**/*.tmp
+**/.DS_Store
+node_modules/
+.venv/
+venv/
+infra/cloudformation/
+docs/
+test-vectors/

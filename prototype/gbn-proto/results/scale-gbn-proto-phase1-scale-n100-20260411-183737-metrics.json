@@ -1,0 +1,33 @@
+{
+    "MetricDataResults": [
+        {
+            "Id": "circuit",
+            "Label": "circuit",
+            "Timestamps": [],
+            "Values": [],
+            "StatusCode": "Complete"
+        },
+        {
+            "Id": "gossipbw",
+            "Label": "gossipbw",
+            "Timestamps": [],
+            "Values": [],
+            "StatusCode": "Complete"
+        },
+        {
+            "Id": "chunks",
+            "Label": "chunks",
+            "Timestamps": [],
+            "Values": [],
+            "StatusCode": "Complete"
+        },
+        {
+            "Id": "bootstrap",
+            "Label": "bootstrap",
+            "Timestamps": [],
+            "Values": [],
+            "StatusCode": "Complete"
+        }
+    ],
+    "Messages": []
+}

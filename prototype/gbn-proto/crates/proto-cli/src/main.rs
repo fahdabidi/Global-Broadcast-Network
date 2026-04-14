@@ -14,7 +14,7 @@ use clap::{Parser, Subcommand};
 use gbn_protocol::chunk::EncryptedChunkPacket;
 use mcn_chunker::{chunk_file, hash_file};
 use mcn_crypto::{create_upload_session, generate_publisher_keypair, PublisherSecret};
-use mcn_router_sim::create_multipath_router;
+use mcn_router_sim::{create_multipath_router, swarm};
 use mcn_sanitizer::{is_ffmpeg_available, sanitize_video};
 use mpub_receiver::Receiver;
 
@@ -61,6 +61,13 @@ enum Commands {
         #[arg(long)]
         reassembled: String,
     },
+
+    /// Run a long‑running service (relay, creator, or publisher)
+    Serve {
+        /// Override the role inferred from GBN_ROLE env var
+        #[arg(long)]
+        role: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -89,6 +96,7 @@ async fn main() -> anyhow::Result<()> {
             println!("Private seed saved to: publisher.key (KEEP SECRET)");
             println!("Public key saved to:   publisher.pub ({} bytes)", pubkey.len());
             println!("Hex public key:        {}", hex::encode(pubkey));
+            Ok(())
         }
         
         Commands::Upload { input, paths, hops, chunk_size } => {
@@ -187,6 +195,7 @@ async fn main() -> anyhow::Result<()> {
             // Cleanup
             router.shutdown().await;
             receiver_handle.shutdown();
+            Ok(())
         }
 
         Commands::Verify { original, reassembled } => {
@@ -201,8 +210,34 @@ async fn main() -> anyhow::Result<()> {
                 println!("Reassembled: {}", hex::encode(h2));
                 std::process::exit(1);
             }
+            Ok(())
+        }
+
+        Commands::Serve { role } => {
+            // Determine role from environment or argument
+            let role = role.or_else(|| std::env::var("GBN_ROLE").ok()).unwrap_or_else(|| "relay".to_string());
+            tracing::info!("Starting {} service", role);
+
+            match role.as_str() {
+                "relay" | "creator" => {
+                    // Both relay and creator run the swarm
+                    let local_key = libp2p::identity::Keypair::generate_ed25519();
+                    let mut swarm = swarm::build_swarm(local_key).await?;
+                    let mut runtime = swarm::GossipRuntime::from_env().await;
+                    tracing::info!("Swarm built, running until Ctrl+C");
+                    swarm::run_swarm_until_ctrl_c(&mut swarm, &mut runtime).await?;
+                }
+                "publisher" => {
+                    // Publisher runs a long‑running receiver service
+                    // For now, just wait forever (placeholder)
+                    tracing::info!("Publisher service: waiting indefinitely (placeholder)");
+                    tokio::signal::ctrl_c().await?;
+                }
+                _ => {
+                    anyhow::bail!("Unknown GBN_ROLE: {}", role);
+                }
+            }
+            Ok(())
         }
     }
-
-    Ok(())
 }

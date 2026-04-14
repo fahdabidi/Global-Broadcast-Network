@@ -1,0 +1,60 @@
+{
+    "MetricDataResults": [
+        {
+            "Id": "circuit",
+            "Label": "circuit",
+            "Timestamps": [],
+            "Values": [],
+            "StatusCode": "Complete"
+        },
+        {
+            "Id": "chunks",
+            "Label": "chunks",
+            "Timestamps": [],
+            "Values": [],
+            "StatusCode": "Complete"
+        },
+        {
+            "Id": "gossipbw",
+            "Label": "gossipbw",
+            "Timestamps": [],
+            "Values": [],
+            "StatusCode": "Complete"
+        },
+        {
+            "Id": "bootstrap",
+            "Label": "bootstrap",
+            "Timestamps": [
+                "2026-04-13T13:32:00-07:00",
+                "2026-04-13T13:33:00-07:00",
+                "2026-04-13T13:34:00-07:00",
+                "2026-04-13T13:36:00-07:00",
+                "2026-04-13T13:42:00-07:00",
+                "2026-04-13T13:43:00-07:00",
+                "2026-04-13T13:46:00-07:00"
+            ],
+            "Values": [
+                1.0,
+                3.0,
+                1.0,
+                2.0,
+                1.0,
+                2.0,
+                2.0
+            ],
+            "StatusCode": "PartialData",
+            "Messages": [
+                {
+                    "Code": "PartialData",
+                    "Value": "The expression may contain partial data as one or more metrics have StatusCode 'Paginated'"
+                }
+            ]
+        }
+    ],
+    "Messages": [
+        {
+            "Code": "MaxMetricsExceeded",
+            "Value": "Maximum number of allowed metrics exceeded"
+        }
+    ]
+}

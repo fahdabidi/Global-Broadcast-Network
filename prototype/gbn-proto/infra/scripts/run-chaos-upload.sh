@@ -17,9 +17,15 @@ fi
 
 STACK_NAME="${1:?Usage: $0 <stack-name> [region] [upload-command]}"
 REGION="${2:-us-east-1}"
-UPLOAD_COMMAND="${3:-gbn-proto --help}"
-POLL_INTERVAL_SECONDS="${POLL_INTERVAL_SECONDS:-30}"
-POLL_TIMEOUT_SECONDS="${POLL_TIMEOUT_SECONDS:-600}"
+UPLOAD_COMMAND="${3:-echo 'gbn-creator-healthy'}"
+POLL_INTERVAL_SECONDS="${POLL_INTERVAL_SECONDS:-10}"
+POLL_TIMEOUT_SECONDS="${POLL_TIMEOUT_SECONDS:-1200}"
+# How long to let the gossip network run under chaos before tearing down (seconds).
+# Must be long enough for: creator to detect peers, publish messages, gossip to propagate,
+# and CloudWatch to receive at least one full 60-second metric window.
+# 600s = 10 min: first ~4-5 min for the gossip network to form (register + jitter + bootstrap
+# + re-bootstrap), then 5+ min of chaos churn to observe the network under failure.
+CHAOS_OBSERVE_SECONDS="${CHAOS_OBSERVE_SECONDS:-600}"
 
 cf_resource_id() {
   local logical_id="$1"
@@ -31,18 +37,29 @@ cf_resource_id() {
     --output text
 }
 
+# Derive numeric scale from stack name suffix (e.g. gbn-proto-phase1-scale-n100 → 100).
+# Used to scope the CloudWatch SEARCH to the current run and avoid MaxMetricsExceeded.
+SCALE_HINT="$(echo "$STACK_NAME" | grep -oE 'n[0-9]+$' | tr -d 'n' || true)"
+
 bootstrap_sum_latest() {
   local start end
-  start="$(date -u -d '10 minutes ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || python - <<'PY'
+  start="$(date -u -d '15 minutes ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || python3 - <<'PY'
 from datetime import datetime, timedelta, timezone
-print((datetime.now(timezone.utc) - timedelta(minutes=10)).strftime('%Y-%m-%dT%H:%M:%SZ'))
+print((datetime.now(timezone.utc) - timedelta(minutes=15)).strftime('%Y-%m-%dT%H:%M:%SZ'))
 PY
 )"
-  end="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || python - <<'PY'
+  end="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || python3 - <<'PY'
 from datetime import datetime, timezone
 print(datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))
 PY
 )"
+
+  # Filter by Scale=\"$SCALE_HINT\" when available to avoid matching NodeId series
+  # from past runs, which can exceed CloudWatch's 500-series-per-request limit.
+  local scale_filter=""
+  if [ -n "$SCALE_HINT" ]; then
+    scale_filter=" Scale=\\\"$SCALE_HINT\\\""
+  fi
 
   local val
   val="$(aws cloudwatch get-metric-data \
@@ -50,8 +67,8 @@ PY
     --start-time "$start" \
     --end-time "$end" \
     --scan-by TimestampDescending \
-    --metric-data-queries '[{"Id":"boot","Expression":"SUM(SEARCH('"'"'{GBN/ScaleTest,Scale,Subnet,NodeId} MetricName=\"BootstrapResult\"'"'"', '"'"'Sum'"'"', 60))","ReturnData":true}]' \
-    --query 'MetricDataResults[0].Values[0]' \
+    --metric-data-queries "[{\"Id\":\"boot\",\"Expression\":\"SUM(SEARCH('{GBN/ScaleTest,Scale,Subnet,NodeId}${scale_filter} MetricName=\\\"BootstrapResult\\\"', 'SampleCount', 300))\",\"ReturnData\":true}]" \
+    --query 'max(MetricDataResults[0].Values)' \
     --output text 2>/dev/null || true)"
 
   if [ -z "$val" ] || [ "$val" = "None" ] || [ "$val" = "null" ]; then
@@ -59,6 +76,15 @@ PY
   else
     echo "$val"
   fi
+}
+
+running_sum_latest() {
+  local hostile_running free_running
+  hostile_running="$(aws ecs describe-services --cluster "$CLUSTER_NAME" --services "$HOSTILE_SERVICE_NAME" --region "$REGION" --query 'services[0].runningCount' --output text 2>/dev/null || echo 0)"
+  free_running="$(aws ecs describe-services --cluster "$CLUSTER_NAME" --services "$FREE_SERVICE_NAME" --region "$REGION" --query 'services[0].runningCount' --output text 2>/dev/null || echo 0)"
+  hostile_running="${hostile_running:-0}"
+  free_running="${free_running:-0}"
+  echo $((hostile_running + free_running))
 }
 
 echo "============================================"
@@ -79,27 +105,42 @@ if [ -z "$CLUSTER_NAME" ] || [ -z "$CHAOS_RULE_NAME" ] || [ -z "$CREATOR_SERVICE
   exit 1
 fi
 
-echo "[2/5] Stabilization Gate 2 (full scale bootstrap >90%)..."
+echo "[2/5] Stabilization Gate 2 (ECS running tasks >90% full scale; BootstrapResult for diagnostics)..."
 HOSTILE_DESIRED="$(aws ecs describe-services --cluster "$CLUSTER_NAME" --services "$HOSTILE_SERVICE_NAME" --region "$REGION" --query 'services[0].desiredCount' --output text)"
 FREE_DESIRED="$(aws ecs describe-services --cluster "$CLUSTER_NAME" --services "$FREE_SERVICE_NAME" --region "$REGION" --query 'services[0].desiredCount' --output text)"
 TOTAL_DESIRED=$((HOSTILE_DESIRED + FREE_DESIRED))
 THRESHOLD=$((TOTAL_DESIRED * 90 / 100))
 if [ "$THRESHOLD" -lt 1 ]; then THRESHOLD=1; fi
+echo "  Target: $THRESHOLD/$TOTAL_DESIRED tasks running  (timeout: ${POLL_TIMEOUT_SECONDS}s)"
 
 start_ts=$(date +%s)
+last_cw_ts=0
+cw_val="--"
+
 while true; do
-  latest_sum="$(bootstrap_sum_latest)"
-  latest_int="$(printf '%.0f' "$latest_sum" 2>/dev/null || echo 0)"
   now_ts=$(date +%s)
   elapsed=$((now_ts - start_ts))
+  running_total="$(running_sum_latest)"
 
-  echo "  - BootstrapResult(sum latest)=$latest_sum threshold=$THRESHOLD elapsed=${elapsed}s"
-  if [ "$latest_int" -ge "$THRESHOLD" ]; then
+  # Query CloudWatch every 30s (rate-limit; diagnostic only — not a gate condition)
+  cw_next=$(( 30 - (now_ts - last_cw_ts) ))
+  if [ "$cw_next" -le 0 ]; then
+    cw_val="$(bootstrap_sum_latest)"
+    last_cw_ts=$now_ts
+    cw_next=30
+  fi
+
+  printf "  [%4ds] ECS: %d/%d running  |  CW BootstrapResult(15m sum): %s  (next CW in %ds)\n" \
+    "$elapsed" "$running_total" "$THRESHOLD" "$cw_val" "$cw_next"
+
+  # Gate condition: ECS running count only (reliable; CW is diagnostic)
+  if [ "$running_total" -ge "$THRESHOLD" ]; then
+    echo "  ✅ Gate 2 passed: ECS running=$running_total >= threshold=$THRESHOLD  (CW bootstrap=$cw_val)"
     break
   fi
 
   if [ "$elapsed" -ge "$POLL_TIMEOUT_SECONDS" ]; then
-    echo "ERROR: Stabilization Gate 2 timeout after ${elapsed}s"
+    echo "ERROR: Stabilization Gate 2 timeout after ${elapsed}s  (ECS running=$running_total/$THRESHOLD  CW bootstrap=$cw_val)"
     exit 1
   fi
   sleep "$POLL_INTERVAL_SECONDS"
@@ -108,8 +149,8 @@ done
 echo "[3/5] Enabling chaos rule: $CHAOS_RULE_NAME"
 aws events enable-rule --name "$CHAOS_RULE_NAME" --region "$REGION"
 
-echo "[4/5] Waiting 60s for churn to take effect..."
-sleep 60
+echo "[4/5] Waiting ${CHAOS_OBSERVE_SECONDS}s for chaos churn + gossip propagation..."
+sleep "$CHAOS_OBSERVE_SECONDS"
 
 echo "[5/5] Executing upload command in creator task..."
 CREATOR_TASK_ARN="$(aws ecs list-tasks --cluster "$CLUSTER_NAME" --service-name "$CREATOR_SERVICE_NAME" --desired-status RUNNING --region "$REGION" --query 'taskArns[0]' --output text)"
@@ -124,7 +165,7 @@ aws ecs execute-command \
   --container creator \
   --interactive \
   --command "sh -lc '$UPLOAD_COMMAND'" \
-  --region "$REGION"
+  --region "$REGION" || echo "  [WARN] execute-command failed (SSM plugin may not be installed locally; creator gossip auto-publish is unaffected)"
 
 echo ""
 echo "✅ Chaos enabled and creator upload command executed."

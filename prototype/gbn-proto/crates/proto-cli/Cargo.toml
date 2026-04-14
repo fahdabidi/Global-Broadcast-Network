@@ -16,6 +16,7 @@ mcn-chunker = { path = "../mcn-chunker" }
 mcn-crypto = { path = "../mcn-crypto" }
 mcn-router-sim = { path = "../mcn-router-sim" }
 mpub-receiver = { path = "../mpub-receiver" }
+libp2p = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }

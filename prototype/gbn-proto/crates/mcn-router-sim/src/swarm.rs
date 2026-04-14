@@ -2,8 +2,8 @@ use anyhow::Result;
 use aws_sdk_servicediscovery::types::HealthStatusFilter;
 use crate::observability::MetricsReporter;
 use crate::gossip::{
-    new_plumtree_behaviour, GossipRequest, GossipResponse, OutboundGossip, PlumTreeBehaviour,
-    PlumTreeEngine,
+    new_plumtree_behaviour, GossipRequest, GossipResponse, MessageId, OutboundGossip,
+    PlumTreeBehaviour, PlumTreeEngine,
 };
 use libp2p::futures::StreamExt;
 use libp2p::{
@@ -15,6 +15,7 @@ use libp2p::{
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, Swarm, SwarmBuilder,
 };
+use rand::Rng;
 use std::{collections::HashMap, env, net::IpAddr};
 use std::time::Duration;
 use tokio::time::Instant;
@@ -32,6 +33,12 @@ pub struct GossipRuntime {
     pub last_gossip_bytes_published: u64,
     pub last_gossip_publish: Instant,
     pub last_gossip_expiry: Instant,
+    pub role: String,
+    pub creator_publish_interval: Duration,
+    pub last_creator_publish: Option<Instant>, // None = never published; triggers immediately once peers connect
+    pub creator_seq: u64,
+    pub last_rebootstrap: Instant,
+    pub rebootstrap_interval: Duration,
 }
 
 pub fn gossip_config_from_env() -> (usize, usize) {
@@ -58,12 +65,30 @@ impl GossipRuntime {
     pub async fn from_env() -> Self {
         let (gossip_bps, max_tracked_messages) = gossip_config_from_env();
         let metrics = MetricsReporter::from_env().await.ok();
+        let role = env::var("GBN_ROLE").unwrap_or_else(|_| "relay".to_string());
+        let creator_publish_interval = Duration::from_secs(
+            env::var("GBN_CREATOR_PUBLISH_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(30),
+        );
         Self {
             engine: PlumTreeEngine::new(gossip_bps, max_tracked_messages),
             metrics,
             last_gossip_bytes_published: 0,
             last_gossip_publish: Instant::now(),
             last_gossip_expiry: Instant::now(),
+            role,
+            creator_publish_interval,
+            last_creator_publish: None, // None = never published; fires as soon as first peer connects
+            creator_seq: 0,
+            last_rebootstrap: Instant::now(),
+            rebootstrap_interval: Duration::from_secs(
+                env::var("GBN_REBOOTSTRAP_INTERVAL_SECS")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(60),
+            ),
         }
     }
 }
@@ -95,6 +120,33 @@ pub async fn build_swarm(local_key: identity::Keypair) -> Result<Swarm<RouterBeh
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
         .build();
 
+    // Start listening for inbound connections BEFORE registering with Cloud Map.
+    // Without listen_on, nodes accept no inbound dials — ConnectionEstablished never
+    // fires, lazy_peers stays empty, and gossip never flows even if dials are initiated.
+    let p2p_port = env::var("GBN_P2P_PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(4001);
+    let listen_addr: libp2p::Multiaddr = format!("/ip4/0.0.0.0/tcp/{}", p2p_port)
+        .parse()
+        .expect("static multiaddr template");
+    swarm.listen_on(listen_addr)?;
+
+    // Register FIRST so other concurrently-starting nodes can discover us,
+    // then stagger bootstrap with a random jitter to avoid a thundering-herd
+    // race where all nodes start simultaneously and all find 0 peers.
+    let _ = register_with_cloudmap(&swarm).await;
+
+    let jitter_max = env::var("GBN_BOOTSTRAP_JITTER_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(20);
+    if jitter_max > 0 {
+        let jitter = rand::thread_rng().gen_range(0..=jitter_max);
+        tracing::info!("Bootstrap jitter: sleeping {}s before peer discovery", jitter);
+        tokio::time::sleep(Duration::from_secs(jitter)).await;
+    }
+
     let added = bootstrap_from_cloudmap(&mut swarm).await?;
     tokio::spawn(async move {
         match MetricsReporter::from_env().await {
@@ -106,7 +158,6 @@ pub async fn build_swarm(local_key: identity::Keypair) -> Result<Swarm<RouterBeh
             Err(e) => tracing::warn!("CloudWatch MetricsReporter init failed: {e}"),
         }
     });
-    let _ = register_with_cloudmap(&swarm).await;
 
     Ok(swarm)
 }
@@ -169,7 +220,18 @@ pub async fn drive_swarm_once(
     swarm: &mut Swarm<RouterBehaviour>,
     runtime: &mut GossipRuntime,
 ) -> Result<()> {
-    if let Some(event) = swarm.next().await {
+    // Poll swarm with a 200ms timeout so periodic tasks (gossip publish, re-bootstrap,
+    // creator inject) always run on schedule even when no swarm events are arriving.
+    // Without this, swarm.next().await blocks indefinitely on an idle network and all
+    // the timers below never fire — causing GossipBandwidthBytes / ChunksDelivered to
+    // be zero forever.
+    // We extract the event BEFORE the match so swarm is free to re-borrow inside handle_gossip_event.
+    let swarm_event = tokio::select! {
+        event = swarm.next() => event,
+        _ = tokio::time::sleep(Duration::from_millis(200)) => None,
+    };
+
+    if let Some(event) = swarm_event {
         match event {
             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                 runtime.engine.add_lazy_peer(peer_id);
@@ -184,8 +246,17 @@ pub async fn drive_swarm_once(
     if runtime.last_gossip_publish.elapsed() >= Duration::from_secs(10) {
         let total = runtime.engine.state.bytes_sent_total();
         let delta = total.saturating_sub(runtime.last_gossip_bytes_published);
+        // Prefer the cached reporter; fall back to spawning a fresh one so that a None
+        // runtime.metrics (e.g. from a transient init-time credential error) never
+        // silently drops metrics for the entire lifetime of the process.
         if let Some(metrics) = &runtime.metrics {
             let _ = metrics.publish_gossip_bandwidth_bytes(delta).await;
+        } else {
+            tokio::spawn(async move {
+                if let Ok(reporter) = MetricsReporter::from_env().await {
+                    let _ = reporter.publish_gossip_bandwidth_bytes(delta).await;
+                }
+            });
         }
         runtime.last_gossip_bytes_published = total;
         runtime.last_gossip_publish = Instant::now();
@@ -195,6 +266,64 @@ pub async fn drive_swarm_once(
     if runtime.last_gossip_expiry.elapsed() >= Duration::from_secs(60) {
         runtime.engine.state.expire_missing_older_than(Duration::from_secs(300));
         runtime.last_gossip_expiry = Instant::now();
+    }
+
+    // Periodic re-bootstrap: if we have no peers (e.g. we lost all connections or bootstrap
+    // fired before anyone registered), re-discover from Cloud Map every rebootstrap_interval.
+    let total_known_peers = runtime.engine.state.eager_peers.len() + runtime.engine.state.lazy_peers.len();
+    if total_known_peers == 0 && runtime.last_rebootstrap.elapsed() >= runtime.rebootstrap_interval {
+        let added = bootstrap_from_cloudmap(swarm).await.unwrap_or(0);
+        tracing::info!("Re-bootstrap attempt: discovered {} new peers via Cloud Map", added);
+        runtime.last_rebootstrap = Instant::now();
+    }
+
+    // Creator role: periodically inject a test gossip message to exercise the PlumTree network.
+    // Without at least one publish_local() call, GossipBandwidthBytes stays zero forever.
+    // last_creator_publish is None on first start (fire immediately once peers connect),
+    // then Some(last_time) (fire again after creator_publish_interval elapses).
+    let creator_due = runtime.role == "creator" && match runtime.last_creator_publish {
+        None => true,
+        Some(t) => t.elapsed() >= runtime.creator_publish_interval,
+    };
+    if creator_due {
+        let total_peers = runtime.engine.state.eager_peers.len() + runtime.engine.state.lazy_peers.len();
+        if total_peers > 0 {
+            let mut msg_id: MessageId = [0u8; 32];
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            msg_id[0..8].copy_from_slice(&ts.to_le_bytes());
+            msg_id[8..16].copy_from_slice(&runtime.creator_seq.to_le_bytes());
+
+            let payload = format!("gbn-test-chunk-seq-{}", runtime.creator_seq).into_bytes();
+            runtime.creator_seq += 1;
+
+            let outbound = runtime.engine.publish_local(msg_id, payload);
+            let n_targets = outbound.len();
+            send_outbound(swarm, outbound);
+
+            tracing::info!(
+                seq = runtime.creator_seq,
+                peers = total_peers,
+                targets = n_targets,
+                "Creator: injected gossip message"
+            );
+
+            if let Some(metrics) = &runtime.metrics {
+                let _ = metrics.publish_chunks_delivered(1).await;
+            } else {
+                tokio::spawn(async move {
+                    if let Ok(reporter) = MetricsReporter::from_env().await {
+                        let _ = reporter.publish_chunks_delivered(1).await;
+                    }
+                });
+            }
+            // Only reset the timer after a successful publish so we retry quickly if no peers yet
+            runtime.last_creator_publish = Some(Instant::now());
+        } else {
+            tracing::debug!("Creator: no peers yet, deferring gossip publish");
+        }
     }
 
     Ok(())
@@ -212,7 +341,9 @@ pub async fn bootstrap_from_cloudmap(swarm: &mut Swarm<RouterBehaviour>) -> Resu
         Ok(v) if !v.is_empty() => v,
         _ => return Ok(0),
     };
-    let service_name = env::var("GBN_CLOUDMAP_SERVICE_NAME").unwrap_or_else(|_| "relay".to_string());
+    let service_name = env::var("GBN_CLOUDMAP_SERVICE_NAME")
+        .or_else(|_| env::var("GBN_CLOUDMAP_SERVICE"))
+        .unwrap_or_else(|_| "relay".to_string());
     let p2p_port = env::var("GBN_P2P_PORT")
         .ok()
         .and_then(|p| p.parse::<u16>().ok())
@@ -225,7 +356,10 @@ pub async fn bootstrap_from_cloudmap(swarm: &mut Swarm<RouterBehaviour>) -> Resu
         .discover_instances()
         .namespace_name(&namespace)
         .service_name(&service_name)
-        .health_status(HealthStatusFilter::Healthy)
+        // Use All rather than Healthy: instances registered via RegisterInstance (without
+        // a Cloud Map health check config) have UNKNOWN health status. The Healthy filter
+        // returns zero results for UNKNOWN-status instances, breaking peer discovery.
+        .health_status(HealthStatusFilter::All)
         .send()
         .await?;
 
@@ -245,11 +379,12 @@ pub async fn bootstrap_from_cloudmap(swarm: &mut Swarm<RouterBehaviour>) -> Resu
         if let Some(peer_id_str) = peer_id_str {
             if let Ok(peer_id) = peer_id_str.parse::<libp2p::PeerId>() {
                 swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
-                added += 1;
             }
         }
 
-        let _ = swarm.dial(addr);
+        if swarm.dial(addr).is_ok() {
+            added += 1;
+        }
     }
 
     Ok(added)

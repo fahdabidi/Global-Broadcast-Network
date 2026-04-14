@@ -56,12 +56,29 @@ impl MetricsReporter {
     }
 
     pub async fn publish_gossip_bandwidth_bytes(&self, bytes: u64) -> Result<()> {
-        self.publish_metric(
-            "GossipBandwidthBytes",
-            bytes as f64,
-            StandardUnit::Bytes,
-        )
-        .await
+        // Publish as an aggregate metric (Scale + Subnet only, no NodeId) so the
+        // teardown SEARCH expression never hits CloudWatch's 500-series-per-request
+        // limit.  After 5 × N=100 runs the per-NodeId series count reached exactly
+        // 500, causing the SEARCH to return only stale series and report 0 bytes.
+        // Removing NodeId caps the series count at (distinct Subnets × distinct
+        // Scale values), typically 1–3 entries, regardless of how many runs have run.
+        let datum = MetricDatum::builder()
+            .metric_name("GossipBandwidthBytes")
+            .value(bytes as f64)
+            .unit(StandardUnit::Bytes)
+            .set_dimensions(Some(aggregate_dimensions()))
+            .build();
+        self.client
+            .put_metric_data()
+            .namespace(&self.namespace)
+            .metric_data(datum)
+            .send()
+            .await?;
+        Ok(())
+    }
+
+    pub async fn publish_chunks_delivered(&self, count: u64) -> Result<()> {
+        self.publish_metric("ChunksDelivered", count as f64, StandardUnit::Count).await
     }
 
     pub async fn publish_circuit_build_result(&self, success: bool, latency_ms: u128) -> Result<()> {
@@ -114,5 +131,16 @@ fn default_dimensions() -> Vec<Dimension> {
         Dimension::builder().name("Scale").value(scale).build(),
         Dimension::builder().name("Subnet").value(subnet).build(),
         Dimension::builder().name("NodeId").value(node_id).build(),
+    ]
+}
+
+/// Dimensions without NodeId — used for aggregate metrics that must remain
+/// queryable via CloudWatch SEARCH after many per-node runs accumulate.
+fn aggregate_dimensions() -> Vec<Dimension> {
+    let scale = env::var("GBN_SCALE").unwrap_or_else(|_| "Unknown".to_string());
+    let subnet = env::var("GBN_SUBNET_TAG").unwrap_or_else(|_| "Unknown".to_string());
+    vec![
+        Dimension::builder().name("Scale").value(scale).build(),
+        Dimension::builder().name("Subnet").value(subnet).build(),
     ]
 }

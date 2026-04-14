@@ -150,8 +150,8 @@ Resources:
       VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
-          FromPort: 9000
-          ToPort: 9100
+          FromPort: 4001
+          ToPort: 4001
           CidrIp: 10.0.0.0/16
       SecurityGroupEgress:
         - IpProtocol: -1
@@ -167,8 +167,8 @@ Resources:
       VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
-          FromPort: 9000
-          ToPort: 9100
+          FromPort: 4001
+          ToPort: 4001
           CidrIp: 10.0.3.0/24
       SecurityGroupEgress:
         - IpProtocol: -1
@@ -177,10 +177,36 @@ Resources:
         - Key: Name
           Value: !Sub '${AWS::StackName}-publisher-sg'
 
-  EcrRepository:
+  EcrRepositoryRelay:
     Type: AWS::ECR::Repository
     Properties:
-      RepositoryName: !Sub '${AWS::StackName}/gbn-phase1'
+      RepositoryName: !Sub '${AWS::StackName}-gbn-relay'
+      ImageTagMutability: MUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 50 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 50
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+
+  EcrRepositoryPublisher:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub '${AWS::StackName}-gbn-publisher'
       ImageTagMutability: MUTABLE
       ImageScanningConfiguration:
         ScanOnPush: true
@@ -277,6 +303,8 @@ Resources:
                   - servicediscovery:DiscoverInstances
                   - servicediscovery:GetNamespace
                   - servicediscovery:GetService
+                  - servicediscovery:RegisterInstance
+                  - servicediscovery:DeregisterInstance
                 Resource: '*'
 
   ChaosLambdaRole:
@@ -312,7 +340,7 @@ Resources:
     Properties:
       FunctionName: !Sub '${AWS::StackName}-chaos-controller'
       Runtime: python3.12
-      Handler: chaos-controller.handler
+      Handler: index.handler
       Role: !GetAtt ChaosLambdaRole.Arn
       Timeout: 120
       MemorySize: 256
@@ -427,7 +455,7 @@ Resources:
           Image: !If
             - HasRelayImageOverride
             - !Ref ContainerImageRelay
-            - !Sub '${EcrRepository.RepositoryUri}/gbn-relay:latest'
+            - !Sub '${EcrRepositoryRelay.RepositoryUri}:latest'
           Essential: true
           LogConfiguration:
             LogDriver: awslogs
@@ -446,6 +474,14 @@ Resources:
               Value: gbn.local
             - Name: GBN_CLOUDMAP_SERVICE
               Value: relay
+            - Name: GBN_CLOUDMAP_SERVICE_ID
+              Value: !Ref RelayDiscoveryService
+            - Name: GBN_SCALE
+              Value: !Ref ScaleTarget
+            - Name: GBN_P2P_PORT
+              Value: '4001'
+            - Name: GBN_REBOOTSTRAP_INTERVAL_SECS
+              Value: '20'
 
   PublisherTaskDefinition:
     Type: AWS::ECS::TaskDefinition
@@ -462,10 +498,10 @@ Resources:
           Image: !If
             - HasPublisherImageOverride
             - !Ref ContainerImagePublisher
-            - !Sub '${EcrRepository.RepositoryUri}/gbn-publisher:latest'
+            - !Sub '${EcrRepositoryPublisher.RepositoryUri}:latest'
           Essential: true
           PortMappings:
-            - ContainerPort: 9000
+            - ContainerPort: 4001
               Protocol: tcp
           LogConfiguration:
             LogDriver: awslogs
@@ -478,6 +514,18 @@ Resources:
               Value: publisher
             - Name: GBN_SUBNET_TAG
               Value: FreeSubnet
+            - Name: GBN_DISCOVERY_MODE
+              Value: cloudmap
+            - Name: GBN_CLOUDMAP_NAMESPACE
+              Value: gbn.local
+            - Name: GBN_CLOUDMAP_SERVICE
+              Value: relay
+            - Name: GBN_CLOUDMAP_SERVICE_ID
+              Value: !Ref RelayDiscoveryService
+            - Name: GBN_SCALE
+              Value: !Ref ScaleTarget
+            - Name: GBN_P2P_PORT
+              Value: '4001'
 
   RelayTaskDefinitionHostile:
     Type: AWS::ECS::TaskDefinition
@@ -494,10 +542,10 @@ Resources:
           Image: !If
             - HasRelayImageOverride
             - !Ref ContainerImageRelay
-            - !Sub '${EcrRepository.RepositoryUri}/gbn-relay:latest'
+            - !Sub '${EcrRepositoryRelay.RepositoryUri}:latest'
           Essential: true
           PortMappings:
-            - ContainerPort: 9000
+            - ContainerPort: 4001
               Protocol: tcp
           LogConfiguration:
             LogDriver: awslogs
@@ -516,6 +564,14 @@ Resources:
               Value: gbn.local
             - Name: GBN_CLOUDMAP_SERVICE
               Value: relay
+            - Name: GBN_CLOUDMAP_SERVICE_ID
+              Value: !Ref RelayDiscoveryService
+            - Name: GBN_SCALE
+              Value: !Ref ScaleTarget
+            - Name: GBN_P2P_PORT
+              Value: '4001'
+            - Name: GBN_REBOOTSTRAP_INTERVAL_SECS
+              Value: '20'
 
   RelayTaskDefinitionFree:
     Type: AWS::ECS::TaskDefinition
@@ -532,10 +588,10 @@ Resources:
           Image: !If
             - HasRelayImageOverride
             - !Ref ContainerImageRelay
-            - !Sub '${EcrRepository.RepositoryUri}/gbn-relay:latest'
+            - !Sub '${EcrRepositoryRelay.RepositoryUri}:latest'
           Essential: true
           PortMappings:
-            - ContainerPort: 9000
+            - ContainerPort: 4001
               Protocol: tcp
           LogConfiguration:
             LogDriver: awslogs
@@ -554,6 +610,14 @@ Resources:
               Value: gbn.local
             - Name: GBN_CLOUDMAP_SERVICE
               Value: relay
+            - Name: GBN_CLOUDMAP_SERVICE_ID
+              Value: !Ref RelayDiscoveryService
+            - Name: GBN_SCALE
+              Value: !Ref ScaleTarget
+            - Name: GBN_P2P_PORT
+              Value: '4001'
+            - Name: GBN_REBOOTSTRAP_INTERVAL_SECS
+              Value: '20'
 
   HostileRelayService:
     Type: AWS::ECS::Service
@@ -562,15 +626,13 @@ Resources:
       Cluster: !Ref ECSCluster
       LaunchType: FARGATE
       TaskDefinition: !Ref RelayTaskDefinitionHostile
-      DesiredCount: !FindInMap [ScaleConfig, !Ref ScaleTarget, HostileDesired]
+      DesiredCount: 0
       EnableExecuteCommand: true
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: ENABLED
           Subnets: [!Ref HostileSubnet]
           SecurityGroups: [!Ref RelaySecurityGroup]
-      ServiceRegistries:
-        - RegistryArn: !GetAtt RelayDiscoveryService.Arn
 
   FreeRelayService:
     Type: AWS::ECS::Service
@@ -579,15 +641,13 @@ Resources:
       Cluster: !Ref ECSCluster
       LaunchType: FARGATE
       TaskDefinition: !Ref RelayTaskDefinitionFree
-      DesiredCount: !FindInMap [ScaleConfig, !Ref ScaleTarget, FreeDesired]
+      DesiredCount: 0
       EnableExecuteCommand: true
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: ENABLED
           Subnets: [!Ref FreeSubnet]
           SecurityGroups: [!Ref RelaySecurityGroup]
-      ServiceRegistries:
-        - RegistryArn: !GetAtt RelayDiscoveryService.Arn
 
   CreatorService:
     Type: AWS::ECS::Service
@@ -595,7 +655,7 @@ Resources:
       Cluster: !Ref ECSCluster
       LaunchType: FARGATE
       TaskDefinition: !Ref CreatorTaskDefinition
-      DesiredCount: 1
+      DesiredCount: 0
       EnableExecuteCommand: true
       NetworkConfiguration:
         AwsvpcConfiguration:
@@ -609,7 +669,7 @@ Resources:
       Cluster: !Ref ECSCluster
       LaunchType: FARGATE
       TaskDefinition: !Ref PublisherTaskDefinition
-      DesiredCount: 1
+      DesiredCount: 0
       EnableExecuteCommand: true
       NetworkConfiguration:
         AwsvpcConfiguration:
@@ -738,9 +798,13 @@ Outputs:
     Description: ECS cluster name
     Value: !Ref ECSCluster
 
-  ECRUri:
-    Description: ECR repository base URI (used by build-and-push.sh)
-    Value: !GetAtt EcrRepository.RepositoryUri
+  ECRUriRelay:
+    Description: ECR URI for relay images
+    Value: !GetAtt EcrRepositoryRelay.RepositoryUri
+
+  ECRUriPublisher:
+    Description: ECR URI for publisher images
+    Value: !GetAtt EcrRepositoryPublisher.RepositoryUri
 
   RelayDiscoveryServiceId:
     Description: Cloud Map relay service ID

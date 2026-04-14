@@ -3005,6 +3005,7 @@ dependencies = [
  "clap",
  "gbn-protocol",
  "hex",
+ "libp2p",
  "mcn-chunker",
  "mcn-crypto",
  "mcn-router-sim",
