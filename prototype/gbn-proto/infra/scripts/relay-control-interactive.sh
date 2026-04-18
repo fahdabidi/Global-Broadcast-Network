@@ -271,16 +271,18 @@ _send_cmd() {
 import json, sys
 b64 = sys.argv[1]
 py = (
-    'import os,base64,socket,sys\\n'
-    'p = base64.b64decode(os.environ[\\\"GBN_CTL_B64\\\"]).decode()\\n'
-    's = socket.create_connection((\\\"127.0.0.1\\\", 5050), 5)\\n'
-    's.sendall(p.encode())\\n'
-    's.shutdown(socket.SHUT_WR)\\n'
-    'out = s.recv(131072)\\n'
-    's.close()\\n'
-    'sys.stdout.write(out.decode(\\\"utf-8\\\", errors=\\\"replace\\\"))\\n'
+    \"import base64,json,socket,sys; \"
+    \"raw=base64.b64decode('\" + b64 + \"').decode('utf-8'); \"
+    \"obj=json.loads(raw); \"
+    \"wire=json.dumps(obj,separators=(',',':')).encode('utf-8'); \"
+    \"s=socket.create_connection(('127.0.0.1',5050),5); \"
+    \"s.sendall(wire); \"
+    \"s.shutdown(socket.SHUT_WR); \"
+    \"out=s.recv(131072); \"
+    \"s.close(); \"
+    \"sys.stdout.write(out.decode('utf-8',errors='replace'))\"
 )
-print('GBN_CTL_B64=' + b64 + ' python3 -c ' + json.dumps(py))
+print('python3 -c ' + json.dumps(py))
 " "$b64")"
 
     aws ecs execute-command \
@@ -288,6 +290,7 @@ print('GBN_CTL_B64=' + b64 + ' python3 -c ' + json.dumps(py))
       --task      "$arn" \
       --container "$container" \
       --region    "$AWS_REGION" \
+      --interactive \
       --command "$ecs_cmd" \
       2>&1 | grep -v 'Session Manager plugin\|Starting session\|Exiting session\|installed successfully'
 
