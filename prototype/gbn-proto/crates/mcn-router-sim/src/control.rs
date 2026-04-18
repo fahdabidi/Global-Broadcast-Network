@@ -342,10 +342,11 @@ async fn handle_request(
         }
         ControlRequest::SendDummy { size, path } => {
             let chain = next_chain("");
+            let path_summary = path.join("->");
             push_packet_meta_trace(
                 "ComponentInput",
                 size,
-                &format!("control.SendDummy INPUT size={} path={}", size, path.join("->")),
+                &format!("control.SendDummy INPUT size={} path={}", size, path_summary),
                 &chain,
                 "component.input",
             );
@@ -361,14 +362,18 @@ async fn handle_request(
                     ControlResponse::Ok { msg }
                 }
                 Err(e) => {
+                    let reason = format!(
+                        "SendDummy failed stage=execute_send_dummy size={} path={} err={:#}",
+                        size, path_summary, e
+                    );
                     push_packet_meta_trace(
                         "ComponentError",
                         size,
-                        &format!("control.SendDummy ERROR err={e:#}"),
+                        &format!("control.SendDummy ERROR err={reason}"),
                         &chain,
                         "component.error",
                     );
-                    ControlResponse::Error { reason: format!("{e:#}") }
+                    ControlResponse::Error { reason }
                 }
             }
         }
@@ -526,7 +531,15 @@ async fn execute_send_dummy(
     );
     let dummy_payload = vec![0x42u8; size]; // "B"s
 
-    cm.send_chunk(0, dummy_payload).await.map_err(|e| {
+    cm.send_chunk(0, dummy_payload)
+        .await
+        .with_context(|| {
+            format!(
+                "SendDummy send_chunk failed guard={} middle={} exit={} size={}",
+                guard.addr, middle.addr, exit.addr, size
+            )
+        })
+        .map_err(|e| {
         push_packet_meta_trace(
             "ComponentError",
             size,

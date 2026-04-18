@@ -97,6 +97,18 @@ fn next_chain(parent: &str) -> String {
     }
 }
 
+fn hop_stage_label(idx: usize, total_hops: usize) -> String {
+    if idx == 0 {
+        "guard".to_string()
+    } else if idx + 1 == total_hops {
+        "exit".to_string()
+    } else if total_hops == 3 && idx == 1 {
+        "middle".to_string()
+    } else {
+        format!("middle[{}]", idx)
+    }
+}
+
 /// Build an onion path descriptor (no interactive circuit handshake).
 pub async fn build_circuit(
     creator_priv_key: &[u8; 32],
@@ -181,7 +193,9 @@ fn seal_layer_for_hop(
     next_hop: Option<SocketAddr>,
     inner: Vec<u8>,
     trace_id: &str,
+    stage: &str,
 ) -> Result<Vec<u8>> {
+    let inner_len = inner.len();
     let layer = OnionLayer {
         next_hop,
         inner,
@@ -191,8 +205,19 @@ fn seal_layer_for_hop(
             Some(trace_id.to_string())
         },
     };
-    let bytes = serde_json::to_vec(&layer)?;
-    seal(&hop.identity_pub, &bytes)
+    let bytes = serde_json::to_vec(&layer).with_context(|| {
+        format!(
+            "Failed serializing onion layer stage={} hop={} next_hop={:?} inner_bytes={}",
+            stage, hop.addr, next_hop, inner_len
+        )
+    })?;
+    let plaintext_len = bytes.len();
+    seal(&hop.identity_pub, &bytes).with_context(|| {
+        format!(
+            "Failed sealing onion layer stage={} hop={} next_hop={:?} plaintext_bytes={} inner_bytes={}",
+            stage, hop.addr, next_hop, plaintext_len, inner_len
+        )
+    })
 }
 
 async fn send_chunk_via_circuit(
@@ -244,9 +269,21 @@ async fn send_chunk_via_circuit(
         total_chunks: 0,
         chunk_index,
     };
-    let terminal_payload_bytes = serde_json::to_vec(&terminal_payload)?;
+    let terminal_payload_bytes = serde_json::to_vec(&terminal_payload).with_context(|| {
+        format!(
+            "Failed serializing terminal payload chunk_id={} chunk_index={} bytes={} return_hops={} guard={} middle={} exit={}",
+            chunk_id,
+            chunk_index,
+            payload_len,
+            terminal_payload.return_path.len(),
+            circuit.guard_addr,
+            circuit.middle_addr,
+            circuit.exit_addr
+        )
+    })?;
 
     let final_hop_idx = circuit.path.len() - 1;
+    let final_stage = hop_stage_label(final_hop_idx, circuit.path.len());
     let mut sealed = seal_layer_for_hop(
         &circuit.path[final_hop_idx],
         None,
@@ -255,17 +292,46 @@ async fn send_chunk_via_circuit(
             .get(final_hop_idx)
             .map(String::as_str)
             .unwrap_or(""),
-    )?;
+        &final_stage,
+    )
+    .map_err(|e| {
+        push_packet_meta_trace(
+            "ComponentError",
+            payload_len,
+            &format!(
+                "circuit.send_chunk ERROR stage={} hop={} chunk_id={} err={e:#}",
+                final_stage, circuit.path[final_hop_idx].addr, chunk_id
+            ),
+            &next_chain(&send_input_chain),
+            "circuit.error",
+        );
+        e
+    })?;
 
     for idx in (0..final_hop_idx).rev() {
         let hop = &circuit.path[idx];
         let next_addr = circuit.path[idx + 1].addr;
+        let stage = hop_stage_label(idx, circuit.path.len());
         sealed = seal_layer_for_hop(
             hop,
             Some(next_addr),
             sealed,
             hop_layer_traces.get(idx).map(String::as_str).unwrap_or(""),
-        )?;
+            &stage,
+        )
+        .map_err(|e| {
+            push_packet_meta_trace(
+                "ComponentError",
+                payload_len,
+                &format!(
+                    "circuit.send_chunk ERROR stage={} hop={} next_hop={} chunk_id={} err={e:#}",
+                    stage, hop.addr, next_addr, chunk_id
+                ),
+                &next_chain(&send_input_chain),
+                "circuit.error",
+            );
+            e
+        })?;
     }
 
     let guard_addr = circuit.path[0].addr;

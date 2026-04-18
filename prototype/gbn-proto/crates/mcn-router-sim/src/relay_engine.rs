@@ -246,6 +246,19 @@ async fn handle_onion_connection(mut upstream: TcpStream, local_priv_key: [u8; 3
                     .unwrap_or((ack_from_downstream, None));
             let upstream_chain = ack_chain.unwrap_or_else(|| next_chain(&relay_forward_chain));
 
+            push_packet_meta_trace(
+                "RelayAckPeel",
+                ack_to_upstream.len(),
+                &format!(
+                    "relay.ack_peel node={} next_hop={} bytes={}",
+                    crate::trace::node_id(),
+                    next_hop,
+                    ack_to_upstream.len()
+                ),
+                &upstream_chain,
+                "relay.ack",
+            );
+
             write_raw_frame(&mut upstream, &ack_to_upstream)
                 .await
                 .context("Failed relaying ACK upstream")
@@ -359,6 +372,19 @@ async fn handle_onion_connection(mut upstream: TcpStream, local_priv_key: [u8; 3
             });
 
             let ack = build_ack_onion(&payload)?;
+            push_packet_meta_trace(
+                "RelayAckBuild",
+                ack.len(),
+                &format!(
+                    "relay.ack_build node={} chunk_id={} return_hops={} bytes={}",
+                    crate::trace::node_id(),
+                    payload.chunk_id,
+                    payload.return_path.len(),
+                    ack.len()
+                ),
+                &next_chain(&payload_chain),
+                "relay.ack",
+            );
             write_raw_frame(&mut upstream, &ack)
                 .await
                 .context("Failed writing terminal ACK to upstream")
@@ -457,7 +483,7 @@ fn build_ack_onion(payload: &ChunkPayload) -> Result<Vec<u8>> {
         .trace_id
         .clone()
         .unwrap_or_else(|| ack_trace.clone());
-    for idx in (1..dest_idx).rev() {
+    for idx in 1..dest_idx {
         let current = &payload.return_path[idx];
         let next_addr = payload.return_path[idx - 1].addr;
         layer_trace = next_chain(&layer_trace);

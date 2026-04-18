@@ -40,6 +40,7 @@ SEED_RELAY_KEY_NAME="${SEED_RELAY_KEY_NAME:-}"
 ADMIN_CIDR="${ADMIN_CIDR:-0.0.0.0/0}"
 RESTART_STATIC_NODES="${RESTART_STATIC_NODES:-1}"
 AUTO_BUILD_PUSH_IF_ECR_EMPTY="${AUTO_BUILD_PUSH_IF_ECR_EMPTY:-1}"
+STOP_ECS_TASKS_BEFORE_DEPLOY="${STOP_ECS_TASKS_BEFORE_DEPLOY:-0}"
 
 if [ "$SEED_PERCENT" -lt 1 ] || [ "$SEED_PERCENT" -gt 99 ]; then
   echo "ERROR: SEED_PERCENT must be between 1 and 99."
@@ -146,6 +147,62 @@ wait_for_seed_relay_container() {
   done
 
   return 1
+}
+
+list_service_tasks() {
+  local cluster_name="$1"
+  local service_name="$2"
+  aws ecs list-tasks \
+    --cluster "$cluster_name" \
+    --service-name "$service_name" \
+    --desired-status RUNNING \
+    --region "$REGION" \
+    --query 'taskArns[]' \
+    --output text 2>/dev/null || true
+}
+
+stop_service_tasks() {
+  local cluster_name="$1"
+  local service_name="$2"
+  local reason="$3"
+  local tasks task_count=0
+
+  tasks="$(list_service_tasks "$cluster_name" "$service_name")"
+  if [ -z "$tasks" ] || [ "$tasks" = "None" ]; then
+    echo "  $service_name: no running tasks to stop"
+    return 0
+  fi
+
+  echo "  $service_name: stopping running tasks before force-new-deployment..."
+  while IFS= read -r task_arn; do
+    [ -n "$task_arn" ] || continue
+    aws ecs stop-task \
+      --cluster "$cluster_name" \
+      --task "$task_arn" \
+      --reason "$reason" \
+      --region "$REGION" >/dev/null
+    task_count=$((task_count + 1))
+    echo "    stopped ${task_arn##*/}"
+  done < <(printf '%s\n' "$tasks" | tr '\t' '\n')
+
+  echo "  $service_name: stopped $task_count task(s)"
+}
+
+redeploy_service() {
+  local cluster_name="$1"
+  local service_name="$2"
+  local desired_count="$3"
+
+  if [ "$STOP_ECS_TASKS_BEFORE_DEPLOY" = "1" ]; then
+    stop_service_tasks "$cluster_name" "$service_name" "GBN stop-before-redeploy"
+  fi
+
+  aws ecs update-service \
+    --cluster "$cluster_name" \
+    --service "$service_name" \
+    --desired-count "$desired_count" \
+    --force-new-deployment \
+    --region "$REGION" >/dev/null
 }
 
 echo "============================================"
@@ -287,10 +344,10 @@ GATE_SEED_TASKS=$((HOSTILE_SEED + FREE_SEED))
 echo "[5/7] Scaling to Smoke Test setup (2 Hostile, 1 Free) + 1 Creator..."
 echo "  Hostile relays: $HOSTILE_SEED"
 echo "  Free relays:    $FREE_SEED"
-aws ecs update-service --cluster "$CLUSTER_NAME" --service "$HOSTILE_SERVICE_NAME" --desired-count "$HOSTILE_SEED" --force-new-deployment --region "$REGION" >/dev/null
-aws ecs update-service --cluster "$CLUSTER_NAME" --service "$FREE_SERVICE_NAME" --desired-count "$FREE_SEED" --force-new-deployment --region "$REGION" >/dev/null
+redeploy_service "$CLUSTER_NAME" "$HOSTILE_SERVICE_NAME" "$HOSTILE_SEED"
+redeploy_service "$CLUSTER_NAME" "$FREE_SERVICE_NAME" "$FREE_SEED"
 if [ -n "$CREATOR_SERVICE_NAME" ] && [ "$CREATOR_SERVICE_NAME" != "None" ]; then
-  aws ecs update-service --cluster "$CLUSTER_NAME" --service "$CREATOR_SERVICE_NAME" --desired-count 1 --force-new-deployment --region "$REGION" >/dev/null
+  redeploy_service "$CLUSTER_NAME" "$CREATOR_SERVICE_NAME" 1
   echo "  Creator: 1"
 fi
 
@@ -346,8 +403,8 @@ else
   echo "[7/7] Scaling to full target..."
   echo "  Hostile full: $FULL_HOSTILE"
   echo "  Free full:    $FULL_FREE"
-  aws ecs update-service --cluster "$CLUSTER_NAME" --service "$HOSTILE_SERVICE_NAME" --desired-count "$FULL_HOSTILE" --force-new-deployment --region "$REGION" >/dev/null
-  aws ecs update-service --cluster "$CLUSTER_NAME" --service "$FREE_SERVICE_NAME" --desired-count "$FULL_FREE" --force-new-deployment --region "$REGION" >/dev/null
+  redeploy_service "$CLUSTER_NAME" "$HOSTILE_SERVICE_NAME" "$FULL_HOSTILE"
+  redeploy_service "$CLUSTER_NAME" "$FREE_SERVICE_NAME" "$FULL_FREE"
 
   echo ""
   echo "✅ Scale test stack deployed and scaled to full target."

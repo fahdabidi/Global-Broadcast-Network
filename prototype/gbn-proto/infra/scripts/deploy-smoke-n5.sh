@@ -23,6 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export SMOKE_TOPOLOGY=1
 export SEED_PERCENT=30
 export RESTART_STATIC_NODES=1
+export STOP_ECS_TASKS_BEFORE_DEPLOY=1
 
 echo "============================================"
 echo "  GBN Dedicated Smoke Deploy (n5)"

@@ -347,6 +347,20 @@ _ssm_command_output() {
     --output text 2>/dev/null || true
 }
 
+_extract_repo_digest_for_uri() {
+  local repo_uri="$1" repo_digests_csv="$2"
+  local digest_entry
+
+  IFS=',' read -r -a digest_entries <<< "$repo_digests_csv"
+  for digest_entry in "${digest_entries[@]}"; do
+    if [[ "$digest_entry" == "$repo_uri@"* ]]; then
+      echo "${digest_entry##*@}"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # ─────────────────────────── Execution primitive ─────────────────────────────
 
 # _send_cmd <node-index> <json-payload>
@@ -642,7 +656,7 @@ do_check_images() {
     echo "WARN: unable to fetch latest publisher digest from ECR (${ecr_publisher})"
   fi
 
-  printf "\n%-55s %-14s %-74s %-60s %-12s\n" "NODE" "ROLE" "LOCAL_IMAGE_ID" "ECR_LATEST_TAGGED_IMAGE" "STATUS"
+  printf "\n%-55s %-14s %-74s %-60s %-12s\n" "NODE" "ROLE" "LOCAL_OBSERVED" "ECR_LATEST_TAGGED_IMAGE" "STATUS"
   printf "%-55s %-14s %-74s %-60s %-12s\n" "-------------------------------------------------------" "-------------" "----------------------------------------------" "------------------------------" "------------"
 
   local i
@@ -659,7 +673,7 @@ do_check_images() {
 
     local expected_latest="${expected_uri}:latest"
 
-    local local_image_id="" local_image_ref="" local_status="unknown"
+    local local_image_id="" local_image_ref="" local_repo_digest="" local_status="unknown"
     local raw container
 
     if [[ "$desc" == ECS:* ]]; then
@@ -677,16 +691,21 @@ do_check_images() {
       if [[ -n "$raw" ]]; then
         local_image_ref="$(awk '{print $1}' <<< "$raw")"
         local_image_id="$(awk '{print $2}' <<< "$raw")"
+        local_repo_digest="$local_image_id"
       fi
     elif [[ "$desc" == EC2:* ]]; then
       local rest="${desc#EC2:}"
       local iid="${rest%%:*}"
       container="${rest#*:}"
 
-      raw="$(_ssm_command_output "$iid" "docker inspect \"$container\" --format '{{.Image}} {{.Config.Image}}'")"
+      local inspect_cmd
+      inspect_cmd="img_id=\$(docker inspect \"$container\" --format '{{.Image}}' 2>/dev/null || true); img_ref=\$(docker inspect \"$container\" --format '{{.Config.Image}}' 2>/dev/null || true); repo_digests=''; if [ -n \"\$img_id\" ]; then repo_digests=\$(docker image inspect \"\$img_id\" --format '{{join .RepoDigests \",\"}}' 2>/dev/null || true); fi; printf '%s\t%s\t%s\n' \"\$img_id\" \"\$img_ref\" \"\$repo_digests\""
+      raw="$(_ssm_command_output "$iid" "$inspect_cmd")"
       if [[ -n "$raw" ]]; then
-        local_image_id="$(awk '{print $1}' <<< "$raw")"
-        local_image_ref="$(awk '{print $2}' <<< "$raw")"
+        local repo_digests_csv=""
+        raw="$(printf '%s' "$raw" | head -n 1)"
+        IFS=$'\t' read -r local_image_id local_image_ref repo_digests_csv <<< "$raw"
+        local_repo_digest="$(_extract_repo_digest_for_uri "$expected_uri" "$repo_digests_csv" || true)"
       fi
     fi
 
@@ -698,20 +717,27 @@ do_check_images() {
       fi
     fi
 
+    local local_observed="${local_repo_digest:-$local_image_id}"
+    if [[ -z "$local_observed" || "$local_observed" == "None" ]]; then
+      local_observed="unknown"
+    fi
+
     if [[ "$expected_digest" == "None" || -z "$expected_digest" ]]; then
       local_status="unknown"
-    elif [[ -n "$local_image_id" && "$local_image_id" == "$expected_digest" ]]; then
+    elif [[ -n "$local_repo_digest" && "$local_repo_digest" == "$expected_digest" ]]; then
       local_status="up-to-date"
-    elif [[ "$local_image_ref" == "$expected_latest" ]]; then
+    elif [[ "$desc" == ECS:* && -n "$local_image_id" && "$local_image_id" == "$expected_digest" ]]; then
       local_status="up-to-date"
-    elif [[ "$local_image_id" == "unknown" ]]; then
+    elif [[ "$desc" == EC2:* && "$local_image_ref" == "$expected_latest" ]]; then
+      local_status="tag-only"
+    elif [[ "$local_observed" == "unknown" ]]; then
       local_status="unknown"
     else
       local_status="out-of-date"
     fi
 
     printf "%-55s %-14s %-74s %-60s %-12s\n" \
-      "${NODE_LABELS[$i]}" "$role" "$local_image_id" "$expected_latest" "$local_status"
+      "${NODE_LABELS[$i]}" "$role" "$local_observed" "$expected_latest" "$local_status"
   done
 }
 
