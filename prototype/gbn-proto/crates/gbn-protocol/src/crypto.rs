@@ -26,13 +26,17 @@ pub struct NonceBase(pub [u8; 12]);
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UploadSessionInit {
     /// Creator's ephemeral X25519 public key for this session.
+    #[serde(with = "crate::serde_b64::fixed_32")]
     pub ephemeral_pubkey: EphemeralPublicKey,
     /// Which Publisher key was targeted.
+    #[serde(with = "crate::serde_b64::fixed_32")]
     pub publisher_pubkey: PublisherPublicKey,
     /// Random session identifier.
+    #[serde(with = "crate::serde_b64::fixed_16")]
     pub session_id: [u8; 16],
     /// Total number of chunks the Creator will send.
     pub total_chunks: u32,
     /// BLAKE3 hash of the full sanitized video.
+    #[serde(with = "crate::serde_b64::fixed_32")]
     pub content_hash: [u8; 32],
 }

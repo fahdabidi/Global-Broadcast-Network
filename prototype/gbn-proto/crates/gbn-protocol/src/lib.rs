@@ -16,6 +16,7 @@ pub mod dht;
 pub mod error;
 pub mod manifest;
 pub mod onion;
+pub(crate) mod serde_b64;
 
 /// Protocol version constant. Nodes exchange this during handshake
 /// and must agree on a compatible version to communicate.

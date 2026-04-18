@@ -54,8 +54,10 @@ done
 
 cf_output() {
   local key="$1"
-  aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$AWS_REGION" --output json \
-    | python3 -c "import json,sys; d=json.load(sys.stdin); o=d['Stacks'][0].get('Outputs',[]); print(next((x['OutputValue'] for x in o if x.get('OutputKey')=='$key'), ''))"
+  local raw
+  raw="$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$AWS_REGION" --output json 2>/dev/null)" || true
+  [ -z "$raw" ] && { echo ""; return; }
+  echo "$raw" | python3 -c "import json,sys; d=json.load(sys.stdin); o=d['Stacks'][0].get('Outputs',[]); print(next((x['OutputValue'] for x in o if x.get('OutputKey')=='$key'), ''))"
 }
 
 _ecs_execute_command_retry() {
@@ -393,7 +395,7 @@ py = (
     \"s.settimeout(60); \"
     \"s.sendall(wire); \"
     \"s.shutdown(socket.SHUT_WR); \"
-    \"out=s.recv(131072); \"
+    \"out=b''.join(iter(lambda: s.recv(65536), b'')); \"
     \"s.close(); \"
     \"sys.stdout.write(out.decode('utf-8',errors='replace'))\"
 )
@@ -420,7 +422,9 @@ py = (
     \"s=socket.create_connection(('127.0.0.1',5050),60); \"
     \"s.settimeout(60); \"
     \"s.sendall(p.encode()+b'\\\\n'); \"
-    \"s.shutdown(1); print(s.recv(131072).decode(errors='replace')); s.close()\"
+    \"s.shutdown(1); \"
+    \"out=b''.join(iter(lambda: s.recv(65536), b'')); \"
+    \"print(out.decode(errors='replace')); s.close()\"
 )
 cmd = 'docker exec ' + cont + ' python3 -c ' + json.dumps(py)
 print(json.dumps({'commands': [cmd]}))
@@ -483,11 +487,20 @@ do_dump_dht() {
 do_dump_metadata() {
   echo "" >&2
   read -r -p "Max entries to return (leave blank = all): " lim
+  read -r -p "Filter by Chain ID (leave blank = all): " filter_chain_id
   local json
   if [[ "$lim" =~ ^[1-9][0-9]*$ ]]; then
     json="{\"cmd\":\"DumpMetadata\",\"limit\":$lim}"
   else
     json='{"cmd":"DumpMetadata","limit":0}'
+  fi
+  if [[ -n "${filter_chain_id:-}" ]]; then
+    json="$(python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+d['chain_id'] = sys.argv[1]
+print(json.dumps(d))
+" "$filter_chain_id" <<< "$json")"
   fi
   local scope; scope="$(_pick_scope "DumpMetadata")"
   _run_scope "$scope" "$json"
@@ -605,7 +618,29 @@ do_send_dummy() {
 
   echo ""
   echo "Sending SendDummy to Creator..."
-  _send_cmd "$creator_idx" "$payload"
+  local creator_output chain_id=""
+  creator_output="$(_send_cmd "$creator_idx" "$payload")"
+  printf '%s\n' "$creator_output"
+
+  # Extract root chain_id from the TraceId line emitted before circuit build
+  chain_id="$(printf '%s\n' "$creator_output" | python3 -c "
+import sys, json
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    try:
+        d = json.loads(line)
+        if d.get('type') == 'TraceId' and 'chain_id' in d:
+            sys.stdout.write(d['chain_id'])
+            break
+    except:
+        pass
+" 2>/dev/null || true)"
+
+  if [[ -n "$chain_id" ]]; then
+    echo "" >&2
+    echo "  Root Chain ID: $chain_id" >&2
+  fi
 
   # Optional post-test DumpMetadata
   echo ""
@@ -618,6 +653,16 @@ do_send_dummy() {
     dm_json="{\"cmd\":\"DumpMetadata\",\"limit\":$lim_input}"
   else
     dm_json='{"cmd":"DumpMetadata","limit":0}'
+  fi
+
+  if [[ -n "$chain_id" ]]; then
+    dm_json="$(python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+d['chain_id'] = sys.argv[1]
+print(json.dumps(d))
+" "$chain_id" <<< "$dm_json")"
+    echo "  DumpMetadata filtered to chain: $chain_id" >&2
   fi
 
   echo ""

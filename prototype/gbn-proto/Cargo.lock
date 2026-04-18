@@ -1396,11 +1396,13 @@ dependencies = [
 name = "gbn-protocol"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "blake3",
  "ed25519-dalek",
  "libp2p",
  "serde",
  "serde-big-array",
+ "serde_json",
  "snow",
  "thiserror 1.0.69",
  "zeroize",

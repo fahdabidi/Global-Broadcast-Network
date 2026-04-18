@@ -22,6 +22,8 @@ pub enum ControlRequest {
     },
     DumpMetadata {
         limit: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chain_id: Option<String>,
     },
     BroadcastSeed,
     UnicastDHT {
@@ -33,12 +35,13 @@ pub enum ControlRequest {
 #[serde(tag = "type")]
 pub enum ControlResponse {
     Ok { msg: String },
-    DhtData { 
+    DhtData {
         store: Vec<RelayNode>,
         kademlia_buckets: Vec<String>,
     },
     Metadata { packets: Vec<PacketMeta> },
     Error { reason: String },
+    TraceId { chain_id: String },
 }
 
 // ─────────────────────────── Packet Metadata Tracker ──────────────────────
@@ -174,7 +177,20 @@ pub async fn spawn_control_server(
                                     let req_res: Result<ControlRequest, _> = serde_json::from_str(line.trim());
                                     match req_res {
                                         Ok(req) => {
-                                            let resp = handle_request(req, &seed_store, &swarm_tx, priv_key).await;
+                                            // For SendDummy: emit chain_id immediately before async work begins.
+                                            let pre_chain = match &req {
+                                                ControlRequest::SendDummy { .. } => {
+                                                    let chain = next_chain("");
+                                                    let pre_json = serde_json::to_string(
+                                                        &ControlResponse::TraceId { chain_id: chain.clone() }
+                                                    ).unwrap_or_default();
+                                                    let _ = write.write_all(format!("{}\n", pre_json).as_bytes()).await;
+                                                    let _ = write.flush().await;
+                                                    Some(chain)
+                                                }
+                                                _ => None,
+                                            };
+                                            let resp = handle_request(req, &seed_store, &swarm_tx, priv_key, pre_chain).await;
                                             let resp_json = serde_json::to_string(&resp).unwrap_or_default();
                                             if let Err(e) = write.write_all(format!("{}\n", resp_json).as_bytes()).await {
                                                 warn!("Failed writing to control client: {e}");
@@ -216,6 +232,7 @@ async fn handle_request(
     seed_store: &Arc<RwLock<HashMap<SocketAddr, RelayNode>>>,
     swarm_tx: &mpsc::Sender<SwarmControlCmd>,
     noise_priv_key: [u8; 32],
+    pre_chain: Option<String>,
 ) -> ControlResponse {
     match req {
         ControlRequest::DumpDht => {
@@ -263,7 +280,7 @@ async fn handle_request(
                 kademlia_buckets,
             }
         }
-        ControlRequest::DumpMetadata { limit } => {
+        ControlRequest::DumpMetadata { limit, chain_id } => {
             let chain = next_chain("");
             // 0 or absent → return all entries in the ring
             let effective_limit = match limit {
@@ -274,8 +291,8 @@ async fn handle_request(
                 "ComponentInput",
                 effective_limit,
                 &format!(
-                    "control.DumpMetadata INPUT limit={:?} effective_limit={}",
-                    limit, effective_limit
+                    "control.DumpMetadata INPUT limit={:?} effective_limit={} chain_filter={:?}",
+                    limit, effective_limit, chain_id
                 ),
                 &chain,
                 "component.input",
@@ -284,7 +301,20 @@ async fn handle_request(
                 let ring = get_ring().lock().unwrap();
                 let total = ring.len();
                 // ring is newest-first (push_front); take the first N = the N most recent
-                let packets = ring.iter().take(effective_limit).cloned().collect();
+                let packets = match &chain_id {
+                    Some(cid) => ring
+                        .iter()
+                        .filter(|p| {
+                            #[cfg(feature = "distributed-trace")]
+                            { p.id_chain.contains(cid.as_str()) }
+                            #[cfg(not(feature = "distributed-trace"))]
+                            { let _ = cid; true }
+                        })
+                        .take(effective_limit)
+                        .cloned()
+                        .collect(),
+                    None => ring.iter().take(effective_limit).cloned().collect(),
+                };
                 (packets, total)
             };
             push_packet_meta_trace(
@@ -341,7 +371,7 @@ async fn handle_request(
             ControlResponse::Ok { msg: format!("UnicastDHT NodeAnnounce to {} queued", target_addr) }
         }
         ControlRequest::SendDummy { size, path } => {
-            let chain = next_chain("");
+            let chain = pre_chain.unwrap_or_else(|| next_chain(""));
             let path_summary = path.join("->");
             push_packet_meta_trace(
                 "ComponentInput",
