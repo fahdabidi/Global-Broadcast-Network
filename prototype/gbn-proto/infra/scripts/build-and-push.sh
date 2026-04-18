@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # build-and-push.sh — Build Docker images and push to Amazon ECR for GBN Phase 1 Scale Test.
 #
-# Usage: ./build-and-push.sh <stack-name> [region]
+# Usage: ./build-and-push.sh [stack-name] [region]
+# From WSL Ubuntu: ./build-and-push.sh gbn-proto-phase1-scale-n100 us-east-1
 
 set -euo pipefail
 export AWS_PAGER=""
@@ -37,7 +38,7 @@ if ! command -v docker >/dev/null 2>&1; then
   fi
 fi
 
-STACK_NAME="${1:?Usage: $0 <stack-name> [region]}"
+STACK_NAME="${1:-gbn-proto-phase1-scale-n100}"
 REGION="${2:-us-east-1}"
 
 cf_output() {

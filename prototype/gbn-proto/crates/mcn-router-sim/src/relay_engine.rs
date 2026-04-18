@@ -78,12 +78,19 @@ pub async fn spawn_onion_relay(
                             let key = local_priv_key;
                             tokio::spawn(async move {
                                 if let Err(e) = handle_onion_connection(stream, key).await {
+                                    let err_chain = next_chain("");
                                     let msg = format!(
                                         "relay.handle_connection ERROR node={} listen={} peer={} err={e:#}",
                                         crate::trace::node_id(), bound_addr, peer_addr
                                     );
                                     tracing::error!("{}", msg);
-                                    push_packet_meta_trace("ComponentError", 0, &msg, "", "relay.error");
+                                    push_packet_meta_trace(
+                                        "ComponentError",
+                                        0,
+                                        &msg,
+                                        &err_chain,
+                                        "relay.error",
+                                    );
                                 }
                             });
                         }
@@ -104,18 +111,66 @@ pub async fn spawn_onion_relay(
 }
 
 async fn handle_onion_connection(mut upstream: TcpStream, local_priv_key: [u8; 32]) -> Result<()> {
+    let root_chain = next_chain("");
     let encrypted_layer = timeout(Duration::from_secs(30), read_raw_frame(&mut upstream))
         .await
         .context("Timeout reading upstream raw frame")?
-        .context("Failed reading upstream raw frame")?;
+        .context("Failed reading upstream raw frame")
+        .map_err(|e| {
+            push_packet_meta_trace(
+                "ComponentError",
+                0,
+                &format!("relay.read_upstream ERROR err={e:#}"),
+                &root_chain,
+                "relay.error",
+            );
+            e
+        })?;
 
     let layer_plain = open(&local_priv_key, &encrypted_layer)
-        .context("Failed to open onion layer with local key")?;
+        .context("Failed to open onion layer with local key")
+        .map_err(|e| {
+            push_packet_meta_trace(
+                "ComponentError",
+                encrypted_layer.len(),
+                &format!("relay.open_layer ERROR err={e:#}"),
+                &root_chain,
+                "relay.error",
+            );
+            e
+        })?;
     let layer: OnionLayer =
-        serde_json::from_slice(&layer_plain).context("Failed to decode OnionLayer")?;
+        serde_json::from_slice(&layer_plain)
+            .context("Failed to decode OnionLayer")
+            .map_err(|e| {
+                push_packet_meta_trace(
+                    "ComponentError",
+                    layer_plain.len(),
+                    &format!("relay.decode_layer ERROR err={e:#}"),
+                    &root_chain,
+                    "relay.error",
+                );
+                e
+            })?;
+
+    let incoming_chain = layer.trace_id.clone().unwrap_or_else(|| root_chain.clone());
+    let ingress_chain = next_chain(&incoming_chain);
+    push_packet_meta_trace(
+        "ComponentInput",
+        layer.inner.len(),
+        &format!(
+            "relay.layer INPUT node={} next_hop={:?} bytes={}",
+            crate::trace::node_id(),
+            layer.next_hop,
+            layer.inner.len()
+        ),
+        &ingress_chain,
+        "relay.input",
+    );
 
     match layer.next_hop {
         Some(next_hop) => {
+            let relay_forward_chain = next_chain(&ingress_chain);
             push_packet_meta_trace(
                 "RelayData(Intermediate)",
                 layer.inner.len(),
@@ -125,39 +180,137 @@ async fn handle_onion_connection(mut upstream: TcpStream, local_priv_key: [u8; 3
                     next_hop,
                     layer.inner.len()
                 ),
-                "",
+                &relay_forward_chain,
                 "relay.data",
             );
 
             let mut next_stream = timeout(Duration::from_secs(10), TcpStream::connect(next_hop))
                 .await
                 .context(format!("Timeout dialing next hop {}", next_hop))?
-                .context(format!("Failed connecting to next hop {}", next_hop))?;
+                .context(format!("Failed connecting to next hop {}", next_hop))
+                .map_err(|e| {
+                    push_packet_meta_trace(
+                        "ComponentError",
+                        layer.inner.len(),
+                        &format!(
+                            "relay.connect_next ERROR node={} next_hop={} err={e:#}",
+                            crate::trace::node_id(),
+                            next_hop
+                        ),
+                        &relay_forward_chain,
+                        "relay.error",
+                    );
+                    e
+                })?;
 
             write_raw_frame(&mut next_stream, &layer.inner)
                 .await
-                .context("Failed writing inner onion bytes to next hop")?;
+                .context("Failed writing inner onion bytes to next hop")
+                .map_err(|e| {
+                    push_packet_meta_trace(
+                        "ComponentError",
+                        layer.inner.len(),
+                        &format!(
+                            "relay.write_next ERROR node={} next_hop={} err={e:#}",
+                            crate::trace::node_id(),
+                            next_hop
+                        ),
+                        &relay_forward_chain,
+                        "relay.error",
+                    );
+                    e
+                })?;
 
             let ack_from_downstream = timeout(Duration::from_secs(30), read_raw_frame(&mut next_stream))
                 .await
                 .context("Timeout waiting for downstream ACK frame")?
-                .context("Failed reading downstream ACK frame")?;
+                .context("Failed reading downstream ACK frame")
+                .map_err(|e| {
+                    push_packet_meta_trace(
+                        "ComponentError",
+                        layer.inner.len(),
+                        &format!(
+                            "relay.read_ack_downstream ERROR node={} next_hop={} err={e:#}",
+                            crate::trace::node_id(),
+                            next_hop
+                        ),
+                        &relay_forward_chain,
+                        "relay.error",
+                    );
+                    e
+                })?;
 
             // Peel one ACK layer (reverse onion) before relaying upstream.
-            let ack_to_upstream = peel_ack_for_upstream(&local_priv_key, &ack_from_downstream)
-                .unwrap_or(ack_from_downstream);
+            let (ack_to_upstream, ack_chain) =
+                peel_ack_for_upstream(&local_priv_key, &ack_from_downstream)
+                    .unwrap_or((ack_from_downstream, None));
+            let upstream_chain = ack_chain.unwrap_or_else(|| next_chain(&relay_forward_chain));
 
             write_raw_frame(&mut upstream, &ack_to_upstream)
                 .await
-                .context("Failed relaying ACK upstream")?;
+                .context("Failed relaying ACK upstream")
+                .map_err(|e| {
+                    push_packet_meta_trace(
+                        "ComponentError",
+                        ack_to_upstream.len(),
+                        &format!(
+                            "relay.write_ack_upstream ERROR node={} next_hop={} err={e:#}",
+                            crate::trace::node_id(),
+                            next_hop
+                        ),
+                        &upstream_chain,
+                        "relay.error",
+                    );
+                    e
+                })?;
+            push_packet_meta_trace(
+                "ComponentOutput",
+                ack_to_upstream.len(),
+                &format!(
+                    "relay.ack_relay OUTPUT node={} next_hop={} bytes={}",
+                    crate::trace::node_id(),
+                    next_hop,
+                    ack_to_upstream.len()
+                ),
+                &next_chain(&upstream_chain),
+                "relay.output",
+            );
         }
         None => {
             // Terminal destination for this onion message.
             let payload: ChunkPayload =
-                serde_json::from_slice(&layer.inner).context("Failed to decode ChunkPayload")?;
+                serde_json::from_slice(&layer.inner)
+                    .context("Failed to decode ChunkPayload")
+                    .map_err(|e| {
+                        push_packet_meta_trace(
+                            "ComponentError",
+                            layer.inner.len(),
+                            &format!("relay.decode_payload ERROR err={e:#}"),
+                            &ingress_chain,
+                            "relay.error",
+                        );
+                        e
+                    })?;
+            let payload_chain = payload
+                .trace_id
+                .clone()
+                .unwrap_or_else(|| next_chain(&ingress_chain));
 
             let got_hash = *blake3::hash(&payload.chunk).as_bytes();
             if got_hash != payload.hash {
+                push_packet_meta_trace(
+                    "ComponentError",
+                    payload.chunk.len(),
+                    &format!(
+                        "relay.hash_mismatch ERROR node={} chunk_id={} expected={} got={}",
+                        crate::trace::node_id(),
+                        payload.chunk_id,
+                        hex::encode(payload.hash),
+                        hex::encode(got_hash)
+                    ),
+                    &payload_chain,
+                    "relay.error",
+                );
                 anyhow::bail!(
                     "Chunk hash mismatch at destination: expected {}, got {}",
                     hex::encode(payload.hash),
@@ -173,6 +326,18 @@ async fn handle_onion_connection(mut upstream: TcpStream, local_priv_key: [u8; 3
                         "Destination relay failed forwarding chunk to Publisher {}: {e:#}",
                         publisher_addr
                     );
+                    push_packet_meta_trace(
+                        "ComponentError",
+                        payload.chunk.len(),
+                        &format!(
+                            "relay.forward_publisher ERROR node={} publisher={} chunk_id={} err={e:#}",
+                            crate::trace::node_id(),
+                            publisher_addr,
+                            payload.chunk_id
+                        ),
+                        &payload_chain,
+                        "relay.error",
+                    );
                 }
             }
 
@@ -185,7 +350,7 @@ async fn handle_onion_connection(mut upstream: TcpStream, local_priv_key: [u8; 3
                     payload.chunk_id,
                     payload.chunk.len()
                 ),
-                "",
+                &next_chain(&payload_chain),
                 "relay.data",
             );
 
@@ -196,17 +361,34 @@ async fn handle_onion_connection(mut upstream: TcpStream, local_priv_key: [u8; 3
             let ack = build_ack_onion(&payload)?;
             write_raw_frame(&mut upstream, &ack)
                 .await
-                .context("Failed writing terminal ACK to upstream")?;
+                .context("Failed writing terminal ACK to upstream")
+                .map_err(|e| {
+                    push_packet_meta_trace(
+                        "ComponentError",
+                        ack.len(),
+                        &format!(
+                            "relay.write_terminal_ack ERROR node={} chunk_id={} err={e:#}",
+                            crate::trace::node_id(),
+                            payload.chunk_id
+                        ),
+                        &next_chain(&payload_chain),
+                        "relay.error",
+                    );
+                    e
+                })?;
         }
     }
 
     Ok(())
 }
 
-fn peel_ack_for_upstream(local_priv_key: &[u8; 32], ack_frame: &[u8]) -> Option<Vec<u8>> {
+fn peel_ack_for_upstream(
+    local_priv_key: &[u8; 32],
+    ack_frame: &[u8],
+) -> Option<(Vec<u8>, Option<String>)> {
     let opened = open(local_priv_key, ack_frame).ok()?;
     let layer: OnionLayer = serde_json::from_slice(&opened).ok()?;
-    Some(layer.inner)
+    Some((layer.inner, layer.trace_id))
 }
 
 fn now_millis() -> u64 {
@@ -214,6 +396,17 @@ fn now_millis() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+fn next_chain(parent: &str) -> String {
+    let hop = crate::trace::next_hop_id();
+    if parent.is_empty() {
+        hop
+    } else if hop.is_empty() {
+        parent.to_string()
+    } else {
+        format!("{parent} -> {hop}")
+    }
 }
 
 /// Build a reverse-direction layered ACK.
@@ -229,9 +422,16 @@ fn build_ack_onion(payload: &ChunkPayload) -> Result<Vec<u8>> {
         "ACK build failed: empty return_path"
     );
 
+    let mut ack_trace = payload.trace_id.clone().unwrap_or_default();
+    ack_trace = next_chain(&ack_trace);
     let ack = AckPayload {
         chunk_id: payload.chunk_id,
         hash: payload.hash,
+        trace_id: if ack_trace.is_empty() {
+            None
+        } else {
+            Some(ack_trace.clone())
+        },
         send_timestamp_ms: payload.send_timestamp_ms,
         received_timestamp_ms: now_millis(),
         total_chunks: payload.total_chunks,
@@ -243,17 +443,32 @@ fn build_ack_onion(payload: &ChunkPayload) -> Result<Vec<u8>> {
     let creator_layer = OnionLayer {
         next_hop: None,
         inner: ack_bytes,
+        trace_id: if ack_trace.is_empty() {
+            None
+        } else {
+            Some(next_chain(&ack_trace))
+        },
     };
     let creator_layer_bytes = serde_json::to_vec(&creator_layer)?;
     let mut sealed = seal(&creator.identity_pub, &creator_layer_bytes)?;
 
     let dest_idx = payload.return_path.len().saturating_sub(1);
+    let mut layer_trace = creator_layer
+        .trace_id
+        .clone()
+        .unwrap_or_else(|| ack_trace.clone());
     for idx in (1..dest_idx).rev() {
         let current = &payload.return_path[idx];
         let next_addr = payload.return_path[idx - 1].addr;
+        layer_trace = next_chain(&layer_trace);
         let layer = OnionLayer {
             next_hop: Some(next_addr),
             inner: sealed,
+            trace_id: if layer_trace.is_empty() {
+                None
+            } else {
+                Some(layer_trace.clone())
+            },
         };
         let layer_bytes = serde_json::to_vec(&layer)?;
         sealed = seal(&current.identity_pub, &layer_bytes)?;
@@ -290,4 +505,3 @@ async fn forward_terminal_chunk_to_publisher(
     pub_stream.flush().await?;
     Ok(())
 }
-

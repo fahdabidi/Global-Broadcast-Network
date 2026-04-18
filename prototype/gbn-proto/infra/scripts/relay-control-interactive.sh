@@ -52,6 +52,12 @@ for dep in aws python3; do
   command -v "$dep" >/dev/null 2>&1 || { echo "ERROR: '$dep' not found in PATH." >&2; exit 1; }
 done
 
+cf_output() {
+  local key="$1"
+  aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$AWS_REGION" --output json \
+    | python3 -c "import json,sys; d=json.load(sys.stdin); o=d['Stacks'][0].get('Outputs',[]); print(next((x['OutputValue'] for x in o if x.get('OutputKey')=='$key'), ''))"
+}
+
 _ecs_execute_command_retry() {
   local arn="$1" container="$2" cmd="$3"
   local attempt max_attempts rc raw filtered
@@ -299,6 +305,46 @@ _pick_scope() {
     esac
     echo "  Invalid." >&2
   done
+}
+
+_ecr_latest_digest_for_repo() {
+  local repo_uri="$1"
+  if [[ -z "$repo_uri" || "$repo_uri" == "None" ]]; then return 1; fi
+
+  local repo_name="${repo_uri##*/}"
+  aws ecr describe-images \
+    --region "$AWS_REGION" \
+    --repository-name "$repo_name" \
+    --image-ids "imageTag=latest" \
+    --query 'imageDetails[0].imageDigest' \
+    --output text 2>/dev/null
+}
+
+_ssm_command_output() {
+  local iid="$1" cmd="$2"
+
+  local params
+  params="$(python3 -c "import json,sys; print(json.dumps({'commands':[sys.argv[1]]}))" "$cmd")"
+
+  local command_id
+  command_id="$(aws ssm send-command \
+    --instance-ids     "$iid" \
+    --document-name    "AWS-RunShellScript" \
+    --parameters       "$params" \
+    --region           "$AWS_REGION" \
+    --query            'Command.CommandId' \
+    --output text)"
+
+  aws ssm wait command-executed \
+    --command-id "$command_id" --instance-id "$iid" \
+    --region "$AWS_REGION" 2>/dev/null || true
+
+  aws ssm get-command-invocation \
+    --command-id "$command_id" \
+    --instance-id "$iid" \
+    --region "$AWS_REGION" \
+    --query 'StandardOutputContent' \
+    --output text 2>/dev/null || true
 }
 
 # ─────────────────────────── Execution primitive ─────────────────────────────
@@ -573,6 +619,102 @@ do_send_dummy() {
   fi
 }
 
+do_check_images() {
+  echo ""
+  echo "===== CheckImages: compare running images to ECR :latest ====="
+
+  local ecr_relay ecr_publisher relay_latest publisher_latest
+  ecr_relay="$(cf_output ECRUriRelay)"
+  ecr_publisher="$(cf_output ECRUriPublisher)"
+
+  if [[ -z "$ecr_relay" || "$ecr_relay" == "None" || -z "$ecr_publisher" || "$ecr_publisher" == "None" ]]; then
+    echo "ERROR: Could not resolve ECRUriRelay and/or ECRUriPublisher from stack '$STACK_NAME' in region '$AWS_REGION'." >&2
+    return 1
+  fi
+
+  relay_latest="$(_ecr_latest_digest_for_repo "$ecr_relay" || true)"
+  publisher_latest="$(_ecr_latest_digest_for_repo "$ecr_publisher" || true)"
+
+  if [[ -z "$relay_latest" || "$relay_latest" == "None" ]]; then
+    echo "WARN: unable to fetch latest relay digest from ECR (${ecr_relay})"
+  fi
+  if [[ -z "$publisher_latest" || "$publisher_latest" == "None" ]]; then
+    echo "WARN: unable to fetch latest publisher digest from ECR (${ecr_publisher})"
+  fi
+
+  printf "\n%-55s %-14s %-74s %-60s %-12s\n" "NODE" "ROLE" "LOCAL_IMAGE_ID" "ECR_LATEST_TAGGED_IMAGE" "STATUS"
+  printf "%-55s %-14s %-74s %-60s %-12s\n" "-------------------------------------------------------" "-------------" "----------------------------------------------" "------------------------------" "------------"
+
+  local i
+  for (( i=0; i<${#NODE_LABELS[@]}; i++ )); do
+    local role="${NODE_ROLES[$i]}"
+    local desc="${NODE_DESCS[$i]}"
+    local expected_uri="$ecr_relay"
+    local expected_digest="$relay_latest"
+
+    if [[ "$role" == "PUBLISHER" ]]; then
+      expected_uri="$ecr_publisher"
+      expected_digest="$publisher_latest"
+    fi
+
+    local expected_latest="${expected_uri}:latest"
+
+    local local_image_id="" local_image_ref="" local_status="unknown"
+    local raw container
+
+    if [[ "$desc" == ECS:* ]]; then
+      local rest="${desc#ECS:}"
+      local arn="${rest%:*}"
+      local container_name="${rest##*:}"
+
+      raw="$(aws ecs describe-tasks \
+        --cluster   "$CLUSTER" \
+        --tasks     "$arn" \
+        --region    "$AWS_REGION" \
+        --query "tasks[0].containers[?name=='$container_name'].[image,imageDigest]" \
+        --output text 2>/dev/null || true)"
+
+      if [[ -n "$raw" ]]; then
+        local_image_ref="$(awk '{print $1}' <<< "$raw")"
+        local_image_id="$(awk '{print $2}' <<< "$raw")"
+      fi
+    elif [[ "$desc" == EC2:* ]]; then
+      local rest="${desc#EC2:}"
+      local iid="${rest%%:*}"
+      container="${rest#*:}"
+
+      raw="$(_ssm_command_output "$iid" "docker inspect \"$container\" --format '{{.Image}} {{.Config.Image}}'")"
+      if [[ -n "$raw" ]]; then
+        local_image_id="$(awk '{print $1}' <<< "$raw")"
+        local_image_ref="$(awk '{print $2}' <<< "$raw")"
+      fi
+    fi
+
+    if [[ -z "$local_image_id" || "$local_image_id" == "None" ]]; then
+      if [[ -n "$local_image_ref" && "$local_image_ref" != "None" ]]; then
+        local_image_id="$local_image_ref"
+      else
+        local_image_id="unknown"
+      fi
+    fi
+
+    if [[ "$expected_digest" == "None" || -z "$expected_digest" ]]; then
+      local_status="unknown"
+    elif [[ -n "$local_image_id" && "$local_image_id" == "$expected_digest" ]]; then
+      local_status="up-to-date"
+    elif [[ "$local_image_ref" == "$expected_latest" ]]; then
+      local_status="up-to-date"
+    elif [[ "$local_image_id" == "unknown" ]]; then
+      local_status="unknown"
+    else
+      local_status="out-of-date"
+    fi
+
+    printf "%-55s %-14s %-74s %-60s %-12s\n" \
+      "${NODE_LABELS[$i]}" "$role" "$local_image_id" "$expected_latest" "$local_status"
+  done
+}
+
 # ─────────────────────────── Main ────────────────────────────────────────────
 
 main() {
@@ -587,13 +729,14 @@ main() {
 
   while true; do
     echo "Command:"
-    select CMD in "DumpDht" "DumpMetadata" "BroadcastSeed" "UnicastDHT" "SendDummy" "Refresh nodes" "Exit"; do
+    select CMD in "DumpDht" "DumpMetadata" "BroadcastSeed" "UnicastDHT" "SendDummy" "checkimages" "Refresh nodes" "Exit"; do
       case "$CMD" in
         DumpDht)           do_dump_dht ;;
         DumpMetadata)      do_dump_metadata ;;
         BroadcastSeed)     do_broadcast_seed ;;
         UnicastDHT)        do_unicast_dht ;;
         SendDummy)         do_send_dummy ;;
+        checkimages)       do_check_images ;;
         "Refresh nodes")   NODE_LABELS=(); NODE_DESCS=(); NODE_IPS=(); NODE_ROLES=()
                            discover_all_nodes; print_node_table ;;
         Exit)              echo "Bye."; exit 0 ;;

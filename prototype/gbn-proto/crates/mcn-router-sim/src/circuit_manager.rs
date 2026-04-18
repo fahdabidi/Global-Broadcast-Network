@@ -22,6 +22,7 @@ use std::{
 };
 use tokio::{net::TcpStream, sync::Mutex, time::timeout};
 
+use crate::control::push_packet_meta_trace;
 use crate::observability::publish_circuit_build_result_from_env;
 use crate::relay_engine::{read_raw_frame, write_raw_frame};
 
@@ -61,6 +62,7 @@ pub struct OnionCircuit {
     pub exit_addr: SocketAddr,
     creator_priv_key: [u8; 32],
     creator_info: HopInfo,
+    trace_id: String,
 }
 
 fn relay_to_hop(node: &RelayNode) -> HopInfo {
@@ -84,15 +86,43 @@ fn now_millis() -> u64 {
         .as_millis() as u64
 }
 
+fn next_chain(parent: &str) -> String {
+    let hop = crate::trace::next_hop_id();
+    if parent.is_empty() {
+        hop
+    } else if hop.is_empty() {
+        parent.to_string()
+    } else {
+        format!("{parent} -> {hop}")
+    }
+}
+
 /// Build an onion path descriptor (no interactive circuit handshake).
 pub async fn build_circuit(
     creator_priv_key: &[u8; 32],
     guard: &RelayNode,
     middle: &RelayNode,
     exit: &RelayNode,
-    _trace_id: &str,
+    trace_id: &str,
 ) -> Result<OnionCircuit> {
     let started = tokio::time::Instant::now();
+    let base_trace = if trace_id.is_empty() {
+        next_chain("")
+    } else {
+        trace_id.to_string()
+    };
+    let build_input_chain = next_chain(&base_trace);
+    push_packet_meta_trace(
+        "ComponentInput",
+        0,
+        &format!(
+            "circuit.build INPUT guard={} middle={} exit={}",
+            guard.addr, middle.addr, exit.addr
+        ),
+        &build_input_chain,
+        "circuit.build",
+    );
+
     let result: Result<OnionCircuit> = async {
         anyhow::ensure!(
             guard.addr != middle.addr && middle.addr != exit.addr && guard.addr != exit.addr,
@@ -114,17 +144,53 @@ pub async fn build_circuit(
             exit_addr: exit.addr,
             creator_priv_key: *creator_priv_key,
             creator_info,
+            trace_id: base_trace.clone(),
         })
     }
     .await;
 
     let latency_ms = started.elapsed().as_millis();
+    match &result {
+        Ok(_) => push_packet_meta_trace(
+            "ComponentOutput",
+            0,
+            &format!(
+                "circuit.build OUTPUT ok guard={} middle={} exit={} latency_ms={}",
+                guard.addr, middle.addr, exit.addr, latency_ms
+            ),
+            &next_chain(&build_input_chain),
+            "circuit.build",
+        ),
+        Err(e) => push_packet_meta_trace(
+            "ComponentError",
+            0,
+            &format!(
+                "circuit.build ERROR guard={} middle={} exit={} err={e:#}",
+                guard.addr, middle.addr, exit.addr
+            ),
+            &next_chain(&build_input_chain),
+            "circuit.error",
+        ),
+    }
     publish_circuit_build_result_from_env(result.is_ok(), latency_ms).await;
     result
 }
 
-fn seal_layer_for_hop(hop: &HopInfo, next_hop: Option<SocketAddr>, inner: Vec<u8>) -> Result<Vec<u8>> {
-    let layer = OnionLayer { next_hop, inner };
+fn seal_layer_for_hop(
+    hop: &HopInfo,
+    next_hop: Option<SocketAddr>,
+    inner: Vec<u8>,
+    trace_id: &str,
+) -> Result<Vec<u8>> {
+    let layer = OnionLayer {
+        next_hop,
+        inner,
+        trace_id: if trace_id.is_empty() {
+            None
+        } else {
+            Some(trace_id.to_string())
+        },
+    };
     let bytes = serde_json::to_vec(&layer)?;
     seal(&hop.identity_pub, &bytes)
 }
@@ -140,18 +206,40 @@ async fn send_chunk_via_circuit(
     );
 
     let chunk_id = chunk_index as u64;
+    let payload_len = payload.len();
     let hash = *blake3::hash(&payload).as_bytes();
     let send_timestamp_ms = now_millis();
+    let chunk_trace_base = next_chain(&circuit.trace_id);
+    let send_input_chain = next_chain(&chunk_trace_base);
+    push_packet_meta_trace(
+        "ComponentInput",
+        payload_len,
+        &format!(
+            "circuit.send_chunk INPUT chunk_id={} chunk_index={} guard={} middle={} exit={}",
+            chunk_id, chunk_index, circuit.guard_addr, circuit.middle_addr, circuit.exit_addr
+        ),
+        &send_input_chain,
+        "circuit.send",
+    );
 
     let mut return_path = Vec::with_capacity(circuit.path.len() + 1);
     return_path.push(circuit.creator_info.clone());
     return_path.extend(circuit.path.clone());
+
+    let mut hop_layer_traces = Vec::with_capacity(circuit.path.len());
+    let mut trace_cursor = chunk_trace_base.clone();
+    for _ in &circuit.path {
+        trace_cursor = next_chain(&trace_cursor);
+        hop_layer_traces.push(trace_cursor.clone());
+    }
+    let payload_trace = next_chain(&trace_cursor);
 
     let terminal_payload = ChunkPayload {
         chunk_id,
         hash,
         chunk: payload,
         return_path,
+        trace_id: Some(payload_trace.clone()),
         send_timestamp_ms,
         total_chunks: 0,
         chunk_index,
@@ -159,33 +247,112 @@ async fn send_chunk_via_circuit(
     let terminal_payload_bytes = serde_json::to_vec(&terminal_payload)?;
 
     let final_hop_idx = circuit.path.len() - 1;
-    let mut sealed = seal_layer_for_hop(&circuit.path[final_hop_idx], None, terminal_payload_bytes)?;
+    let mut sealed = seal_layer_for_hop(
+        &circuit.path[final_hop_idx],
+        None,
+        terminal_payload_bytes,
+        hop_layer_traces
+            .get(final_hop_idx)
+            .map(String::as_str)
+            .unwrap_or(""),
+    )?;
 
     for idx in (0..final_hop_idx).rev() {
         let hop = &circuit.path[idx];
         let next_addr = circuit.path[idx + 1].addr;
-        sealed = seal_layer_for_hop(hop, Some(next_addr), sealed)?;
+        sealed = seal_layer_for_hop(
+            hop,
+            Some(next_addr),
+            sealed,
+            hop_layer_traces.get(idx).map(String::as_str).unwrap_or(""),
+        )?;
     }
 
     let guard_addr = circuit.path[0].addr;
     let mut stream = timeout(Duration::from_secs(10), TcpStream::connect(guard_addr))
         .await
         .context(format!("Timeout connecting to Guard {}", guard_addr))?
-        .context(format!("Failed connecting to Guard {}", guard_addr))?;
+        .context(format!("Failed connecting to Guard {}", guard_addr))
+        .map_err(|e| {
+            push_packet_meta_trace(
+                "ComponentError",
+                payload_len,
+                &format!(
+                    "circuit.send_chunk ERROR connect_guard={} chunk_id={} err={e:#}",
+                    guard_addr, chunk_id
+                ),
+                &next_chain(&send_input_chain),
+                "circuit.error",
+            );
+            e
+        })?;
 
     write_raw_frame(&mut stream, &sealed)
         .await
-        .context("Failed writing outer onion frame to Guard")?;
+        .context("Failed writing outer onion frame to Guard")
+        .map_err(|e| {
+            push_packet_meta_trace(
+                "ComponentError",
+                payload_len,
+                &format!(
+                    "circuit.send_chunk ERROR write_guard={} chunk_id={} err={e:#}",
+                    guard_addr, chunk_id
+                ),
+                &next_chain(&send_input_chain),
+                "circuit.error",
+            );
+            e
+        })?;
 
     let ack_frame = timeout(Duration::from_secs(45), read_raw_frame(&mut stream))
         .await
         .context("Timeout waiting for reverse ACK frame")?
-        .context("Failed reading reverse ACK frame")?;
+        .context("Failed reading reverse ACK frame")
+        .map_err(|e| {
+            push_packet_meta_trace(
+                "ComponentError",
+                payload_len,
+                &format!(
+                    "circuit.send_chunk ERROR read_ack guard={} chunk_id={} err={e:#}",
+                    guard_addr, chunk_id
+                ),
+                &next_chain(&send_input_chain),
+                "circuit.error",
+            );
+            e
+        })?;
 
     let ack_open = open(&circuit.creator_priv_key, &ack_frame)
-        .context("Failed opening creator ACK layer")?;
+        .context("Failed opening creator ACK layer")
+        .map_err(|e| {
+            push_packet_meta_trace(
+                "ComponentError",
+                payload_len,
+                &format!(
+                    "circuit.send_chunk ERROR open_ack chunk_id={} err={e:#}",
+                    chunk_id
+                ),
+                &next_chain(&send_input_chain),
+                "circuit.error",
+            );
+            e
+        })?;
     let ack_layer: OnionLayer =
-        serde_json::from_slice(&ack_open).context("Failed decoding creator ACK OnionLayer")?;
+        serde_json::from_slice(&ack_open)
+            .context("Failed decoding creator ACK OnionLayer")
+            .map_err(|e| {
+                push_packet_meta_trace(
+                    "ComponentError",
+                    payload_len,
+                    &format!(
+                        "circuit.send_chunk ERROR decode_ack_layer chunk_id={} err={e:#}",
+                        chunk_id
+                    ),
+                    &next_chain(&send_input_chain),
+                    "circuit.error",
+                );
+                e
+            })?;
     anyhow::ensure!(
         ack_layer.next_hop.is_none(),
         "Creator ACK layer expected next_hop=None, got {:?}",
@@ -194,25 +361,59 @@ async fn send_chunk_via_circuit(
 
     let ack: AckPayload =
         serde_json::from_slice(&ack_layer.inner).context("Failed decoding AckPayload")?;
-    anyhow::ensure!(
-        ack.chunk_id == chunk_id,
-        "ACK chunk_id mismatch: expected {}, got {}",
-        chunk_id,
-        ack.chunk_id
-    );
-    anyhow::ensure!(
-        ack.hash == hash,
-        "ACK hash mismatch: expected {}, got {}",
-        hex::encode(hash),
-        hex::encode(ack.hash)
-    );
+    if ack.chunk_id != chunk_id {
+        let msg = format!(
+            "ACK chunk_id mismatch: expected {}, got {}",
+            chunk_id, ack.chunk_id
+        );
+        push_packet_meta_trace(
+            "ComponentError",
+            payload_len,
+            &format!("circuit.send_chunk ERROR {}", msg),
+            &next_chain(&send_input_chain),
+            "circuit.error",
+        );
+        anyhow::bail!(msg);
+    }
+    if ack.hash != hash {
+        let msg = format!(
+            "ACK hash mismatch: expected {}, got {}",
+            hex::encode(hash),
+            hex::encode(ack.hash)
+        );
+        push_packet_meta_trace(
+            "ComponentError",
+            payload_len,
+            &format!("circuit.send_chunk ERROR {}", msg),
+            &next_chain(&send_input_chain),
+            "circuit.error",
+        );
+        anyhow::bail!(msg);
+    }
+
+    let ack_chain = ack
+        .trace_id
+        .clone()
+        .or_else(|| ack_layer.trace_id.clone())
+        .unwrap_or_else(|| next_chain(&chunk_trace_base));
 
     tracing::info!(
-        "ACK received for chunk_id={} via guard={} middle={} exit={}",
+        "ACK received for chunk_id={} via guard={} middle={} exit={} trace_id={}",
         chunk_id,
         circuit.guard_addr,
         circuit.middle_addr,
-        circuit.exit_addr
+        circuit.exit_addr,
+        ack_chain
+    );
+    push_packet_meta_trace(
+        "ComponentOutput",
+        payload_len,
+        &format!(
+            "circuit.send_chunk OUTPUT ack chunk_id={} guard={} middle={} exit={}",
+            chunk_id, circuit.guard_addr, circuit.middle_addr, circuit.exit_addr
+        ),
+        &next_chain(&ack_chain),
+        "circuit.send",
     );
     Ok(())
 }
@@ -334,7 +535,15 @@ pub async fn build_circuits_speculative(
     let mut used_relay_addrs = HashSet::new();
 
     for (guard, middle, exit) in candidates {
-        let candidate = build_circuit(creator_priv_key, &guard, &middle, &exit, "").await?;
+        let candidate_trace = format!(
+            "{} [speculative guard={} middle={} exit={}]",
+            next_chain(""),
+            guard.addr,
+            middle.addr,
+            exit.addr
+        );
+        let candidate =
+            build_circuit(creator_priv_key, &guard, &middle, &exit, &candidate_trace).await?;
         let addrs = [candidate.guard_addr, candidate.middle_addr, candidate.exit_addr];
         if addrs.iter().any(|addr| used_relay_addrs.contains(addr)) {
             continue;
