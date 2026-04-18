@@ -23,6 +23,10 @@
 set -euo pipefail
 export AWS_PAGER=""
 
+# Normalize terminal so backspace works correctly in interactive prompts.
+# WSL/Git Bash often has erase=^H but the terminal sends DEL (^?).
+if [ -t 0 ]; then stty sane 2>/dev/null || true; fi
+
 CLUSTER="${1:-gbn-proto-phase1-scale-n100-cluster}"
 AWS_REGION="${2:-us-east-1}"
 STACK_NAME="${3:-gbn-proto-phase1-scale-n100}"
