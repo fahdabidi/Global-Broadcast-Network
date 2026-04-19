@@ -477,6 +477,27 @@ _run_scope() {
   fi
 }
 
+# ─────────────────────────── CloudWatch helpers ──────────────────────────────
+
+# _cw_set_window <lookback-minutes>
+# Sets _CW_NOW and _CW_AGO ISO-8601 timestamps used by _cw_stat.
+_cw_set_window() {
+  local mins="${1:-5}"
+  _CW_NOW="$(python3 -c "from datetime import datetime,timezone; print(datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
+  _CW_AGO="$(python3 -c "from datetime import datetime,timedelta,timezone; print((datetime.now(timezone.utc)-timedelta(minutes=${mins})).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
+}
+
+# _cw_stat <metric-name> <Sum|Average|Maximum> <outfile>
+# Requires _CW_NOW, _CW_AGO, AWS_REGION to be set by caller.
+_cw_stat() {
+  aws cloudwatch get-metric-statistics \
+    --namespace GBN/ScaleTest --metric-name "$1" \
+    --start-time "${_CW_AGO:-}" --end-time "${_CW_NOW:-}" \
+    --period 60 --statistics "$2" \
+    --region "$AWS_REGION" --output json 2>/dev/null \
+    > "$3" || echo '{"Datapoints":[]}' > "$3"
+}
+
 # ─────────────────────────── Commands ────────────────────────────────────────
 
 do_dump_dht() {
@@ -548,6 +569,104 @@ do_unicast_dht() {
   payload="$(printf '{"cmd":"UnicastDHT","target_addr":"%s"}' "$target_ip")"
 
   _send_cmd "$sender_idx" "$payload"
+}
+
+do_live_metrics() {
+  local interval=30
+  read -r -p "Refresh interval in seconds [30]: " iv
+  [[ "$iv" =~ ^[1-9][0-9]*$ ]] && interval="$iv"
+  echo "  Polling every ${interval}s -- Ctrl-C to exit" >&2
+
+  while true; do
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+    _cw_set_window 5
+
+    _cw_stat GossipBandwidthBytes       Sum     "$tmpdir/bw.json"       &
+    _cw_stat GossipBudgetBytesPerWindow Maximum "$tmpdir/budget.json"   &
+    _cw_stat GossipMessagesDropped      Sum     "$tmpdir/dropped.json"  &
+    _cw_stat GossipMessagesSeen         Sum     "$tmpdir/seen.json"     &
+    _cw_stat GossipLazyRepairs          Sum     "$tmpdir/repairs.json"  &
+    _cw_stat DhtNodeCount               Average "$tmpdir/dht.json"      &
+    _cw_stat GossipEagerPeerCount       Average "$tmpdir/eager.json"    &
+    _cw_stat GossipLazyPeerCount        Average "$tmpdir/lazy.json"     &
+    _cw_stat CircuitBuildResult         Sum     "$tmpdir/circuits.json" &
+    _cw_stat ChunkE2ELatencyMs          Average "$tmpdir/e2e.json"      &
+    _cw_stat RelayBytesForwarded        Sum     "$tmpdir/relayb.json"   &
+    _cw_stat PublisherChunksReceived    Sum     "$tmpdir/pubchk.json"   &
+    _cw_stat BootstrapResult            Sum     "$tmpdir/boot.json"     &
+    wait
+
+    clear
+    python3 - "$_CW_NOW" "$STACK_NAME" "$tmpdir" <<'PYEOF'
+import json, sys
+
+def latest(path, stat):
+    try:
+        pts = json.load(open(path)).get('Datapoints', [])
+        if not pts: return None
+        pts.sort(key=lambda p: p['Timestamp'], reverse=True)
+        return pts[0].get(stat)
+    except:
+        return None
+
+def fv(v, fmt):
+    return (fmt % v) if v is not None else '--'
+
+now_str, stack, tmpdir = sys.argv[1], sys.argv[2], sys.argv[3]
+
+bw       = latest(f'{tmpdir}/bw.json',       'Sum')
+budget   = latest(f'{tmpdir}/budget.json',   'Maximum')
+dropped  = latest(f'{tmpdir}/dropped.json',  'Sum')
+seen     = latest(f'{tmpdir}/seen.json',     'Sum')
+repairs  = latest(f'{tmpdir}/repairs.json',  'Sum')
+dht      = latest(f'{tmpdir}/dht.json',      'Average')
+eager    = latest(f'{tmpdir}/eager.json',    'Average')
+lazy_p   = latest(f'{tmpdir}/lazy.json',     'Average')
+circuits = latest(f'{tmpdir}/circuits.json', 'Sum')
+e2e      = latest(f'{tmpdir}/e2e.json',      'Average')
+relayb   = latest(f'{tmpdir}/relayb.json',   'Sum')
+pubchk   = latest(f'{tmpdir}/pubchk.json',   'Sum')
+boot     = latest(f'{tmpdir}/boot.json',     'Sum')
+
+bw_s   = f'{bw/1048576:.1f} MB'     if bw     is not None else '--'
+bud_s  = f'{budget/1048576:.1f} MB' if budget is not None else '--'
+util_s = f'{bw/budget*100:.1f}%'    if (bw is not None and budget and budget > 0) else '--'
+dr_s   = f'{dropped/seen*100:.1f}%' if (dropped is not None and seen and seen > 0) else '--'
+e2e_s  = f'{e2e:.0f} ms'            if e2e    is not None else '--'
+relb_s = f'{relayb/1024:.1f} KB'    if relayb is not None else '--'
+
+W = 79
+print()
+print(f'  GBN Live Metrics \u2014 {now_str}  (Stack: {stack})')
+print('  ' + '\u2500' * W)
+print('  GOSSIP HEALTH')
+print(f'    Bandwidth (5m window)  : {bw_s:>10}  /  budget {bud_s:>10}  utilization {util_s:>8}')
+print(f'    Messages seen          : {fv(seen,    "%12.0f")}')
+print(f'    Messages dropped       : {fv(dropped, "%12.0f")}   drop rate {dr_s:>8}')
+print(f'    Lazy repairs (IWant)   : {fv(repairs, "%12.0f")}')
+print()
+print('  GOSSIP MESH  (avg across nodes)')
+print(f'    DHT node count         : {fv(dht,    "%12.1f")}')
+print(f'    Eager peers / node     : {fv(eager,  "%12.1f")}')
+print(f'    Lazy peers  / node     : {fv(lazy_p, "%12.1f")}')
+print()
+print('  ONION ROUTING')
+print(f'    Circuit builds (5 min) : {fv(circuits, "%12.0f")}')
+print(f'    E2E chunk latency (avg): {e2e_s:>12}')
+print(f'    Relay bytes forwarded  : {relb_s:>12}')
+print()
+print('  DELIVERY')
+print(f'    Publisher chunks recv  : {fv(pubchk, "%12.0f")}')
+print(f'    Bootstrap results      : {fv(boot,   "%12.0f")}')
+print('  ' + '\u2500' * W)
+PYEOF
+
+    rm -rf "$tmpdir"
+    echo ""
+    echo "  Refreshing in ${interval}s -- Ctrl-C to exit"
+    sleep "$interval"
+  done
 }
 
 do_send_dummy() {
@@ -667,15 +786,271 @@ print(json.dumps(d))
 
   echo ""
   echo "====  DumpMetadata: circuit nodes in order  ===="
-  echo ">>> [1/5] Creator";   _send_cmd "$creator_idx" "$dm_json"
-  echo ">>> [2/5] Guard";     _send_cmd "$guard_idx"   "$dm_json"
-  echo ">>> [3/5] Middle";    _send_cmd "$middle_idx"  "$dm_json"
-  echo ">>> [4/5] Exit";      _send_cmd "$exit_idx"    "$dm_json"
+  local creator_meta guard_meta middle_meta exit_meta pub_meta
+
+  echo ">>> [1/5] Creator"
+  creator_meta="$(_send_cmd "$creator_idx" "$dm_json")"
+  printf '%s\n' "$creator_meta"
+
+  echo ">>> [2/5] Guard"
+  guard_meta="$(_send_cmd "$guard_idx" "$dm_json")"
+  printf '%s\n' "$guard_meta"
+
+  echo ">>> [3/5] Middle"
+  middle_meta="$(_send_cmd "$middle_idx" "$dm_json")"
+  printf '%s\n' "$middle_meta"
+
+  echo ">>> [4/5] Exit"
+  exit_meta="$(_send_cmd "$exit_idx" "$dm_json")"
+  printf '%s\n' "$exit_meta"
+
   if (( pub_idx >= 0 )); then
-    echo ">>> [5/5] Publisher"; _send_cmd "$pub_idx"   "$dm_json"
+    echo ">>> [5/5] Publisher"
+    pub_meta="$(_send_cmd "$pub_idx" "$dm_json")"
+    printf '%s\n' "$pub_meta"
   else
+    pub_meta=""
     echo ">>> [5/5] Publisher - skipped (no EC2 descriptor found)"
   fi
+
+  # Optional HTML report
+  echo ""
+  read -r -p "Generate HTML report? [Y/n]: " report_yn
+  [[ "${report_yn,,}" == "n" ]] && return 0
+
+  local report_dir
+  report_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/reports"
+  mkdir -p "$report_dir"
+
+  local ts_file chain_safe report_file
+  ts_file="$(python3 -c 'from datetime import datetime,timezone; print(datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S"))')"
+  chain_safe="$(printf '%s' "${chain_id:-unknown}" | python3 -c 'import sys,re; print(re.sub(r"[^a-zA-Z0-9]","-",sys.stdin.read().strip())[:12])')"
+  report_file="$report_dir/senddummy-${ts_file}-${chain_safe}.html"
+
+  echo "  Collecting CloudWatch snapshot..." >&2
+  local cw_tmp
+  cw_tmp="$(mktemp -d)"
+  _cw_set_window 5
+
+  _cw_stat GossipBandwidthBytes       Sum     "$cw_tmp/bw.json"       &
+  _cw_stat GossipBudgetBytesPerWindow Maximum "$cw_tmp/budget.json"   &
+  _cw_stat GossipMessagesDropped      Sum     "$cw_tmp/dropped.json"  &
+  _cw_stat GossipMessagesSeen         Sum     "$cw_tmp/seen.json"     &
+  _cw_stat GossipLazyRepairs          Sum     "$cw_tmp/repairs.json"  &
+  _cw_stat DhtNodeCount               Average "$cw_tmp/dht.json"      &
+  _cw_stat GossipEagerPeerCount       Average "$cw_tmp/eager.json"    &
+  _cw_stat GossipLazyPeerCount        Average "$cw_tmp/lazy.json"     &
+  _cw_stat CircuitBuildResult         Sum     "$cw_tmp/circuits.json" &
+  _cw_stat ChunkE2ELatencyMs          Average "$cw_tmp/e2e.json"      &
+  _cw_stat RelayBytesForwarded        Sum     "$cw_tmp/relayb.json"   &
+  _cw_stat PublisherChunksReceived    Sum     "$cw_tmp/pubchk.json"   &
+  _cw_stat BootstrapResult            Sum     "$cw_tmp/boot.json"     &
+  wait
+
+  printf '%s' "$creator_meta" > "$cw_tmp/meta_creator.txt"
+  printf '%s' "$guard_meta"   > "$cw_tmp/meta_guard.txt"
+  printf '%s' "$middle_meta"  > "$cw_tmp/meta_middle.txt"
+  printf '%s' "$exit_meta"    > "$cw_tmp/meta_exit.txt"
+  printf '%s' "$pub_meta"     > "$cw_tmp/meta_pub.txt"
+
+  python3 - \
+    "$report_file" \
+    "$STACK_NAME" "$CLUSTER" \
+    "${NODE_LABELS[$creator_idx]}" "${NODE_LABELS[$guard_idx]}" \
+    "${NODE_LABELS[$middle_idx]}"  "${NODE_LABELS[$exit_idx]}"  "$pub_ip" \
+    "$guard_ip" "$middle_ip" "$exit_ip" \
+    "${chain_id:-unknown}" "$size" \
+    "$_CW_NOW" "$cw_tmp" \
+    <<'PYEOF'
+import json, sys, html, re
+
+def latest(path, stat):
+    try:
+        pts = json.load(open(path)).get('Datapoints', [])
+        if not pts: return None
+        pts.sort(key=lambda p: p['Timestamp'], reverse=True)
+        return pts[0].get(stat)
+    except:
+        return None
+
+def fv(v, fmt):
+    return (fmt % v) if v is not None else '--'
+
+def fmt_bytes(v):
+    if v is None: return '--'
+    if v >= 1048576: return f'{v/1048576:.1f} MB'
+    if v >= 1024:    return f'{v/1024:.1f} KB'
+    return f'{v:.0f} B'
+
+def parse_meta(path):
+    try:
+        for line in reversed(open(path).read().splitlines()):
+            line = line.strip()
+            if line.startswith('{') and 'packets' in line:
+                return json.loads(line).get('packets', [])
+    except:
+        pass
+    return []
+
+(report_file, stack, cluster,
+ lbl_creator, lbl_guard, lbl_middle, lbl_exit, lbl_pub,
+ ip_guard, ip_middle, ip_exit,
+ chain_id, size, ts_now, cw_tmp) = sys.argv[1:16]
+
+bw       = latest(f'{cw_tmp}/bw.json',       'Sum')
+budget   = latest(f'{cw_tmp}/budget.json',   'Maximum')
+dropped  = latest(f'{cw_tmp}/dropped.json',  'Sum')
+seen     = latest(f'{cw_tmp}/seen.json',     'Sum')
+repairs  = latest(f'{cw_tmp}/repairs.json',  'Sum')
+dht      = latest(f'{cw_tmp}/dht.json',      'Average')
+eager    = latest(f'{cw_tmp}/eager.json',    'Average')
+lazy_p   = latest(f'{cw_tmp}/lazy.json',     'Average')
+circuits = latest(f'{cw_tmp}/circuits.json', 'Sum')
+e2e      = latest(f'{cw_tmp}/e2e.json',      'Average')
+relayb   = latest(f'{cw_tmp}/relayb.json',   'Sum')
+pubchk   = latest(f'{cw_tmp}/pubchk.json',   'Sum')
+boot     = latest(f'{cw_tmp}/boot.json',     'Sum')
+
+nodes = [
+    ('Creator',   parse_meta(f'{cw_tmp}/meta_creator.txt'), lbl_creator, ''),
+    ('Guard',     parse_meta(f'{cw_tmp}/meta_guard.txt'),   lbl_guard,   ip_guard),
+    ('Middle',    parse_meta(f'{cw_tmp}/meta_middle.txt'),  lbl_middle,  ip_middle),
+    ('Exit',      parse_meta(f'{cw_tmp}/meta_exit.txt'),    lbl_exit,    ip_exit),
+    ('Publisher', parse_meta(f'{cw_tmp}/meta_pub.txt'),     lbl_pub,     ''),
+]
+
+BADGE = {
+    'ComponentInput':          '#3a7bd5',
+    'ComponentOutput':         '#27a745',
+    'ComponentError':          '#dc3545',
+    'RelayData(Intermediate)': '#fd7e14',
+    'RelayAckPeel':            '#fd7e14',
+    'RelayAckBuild':           '#fd7e14',
+    'ExitDelivery':            '#fd7e14',
+}
+
+def badge(action):
+    c = BADGE.get(action, '#6c757d')
+    return (f'<span style="background:{c};color:#fff;padding:1px 6px;'
+            f'border-radius:3px;font-size:11px;margin-right:6px">'
+            f'{html.escape(action)}</span>')
+
+trace_html = ''
+for (role, packets, label, ip) in nodes:
+    ip_part = f'{html.escape(ip)} &nbsp;' if ip else ''
+    rows = ''
+    for p in sorted(packets, key=lambda x: x.get('ts', '')):
+        rows += (
+            f'<tr>'
+            f'<td style="color:#888;white-space:nowrap;padding:3px 8px">{html.escape(str(p.get("ts","")))}</td>'
+            f'<td style="padding:3px 8px">{badge(p.get("action",""))}</td>'
+            f'<td style="color:#aaa;padding:3px 8px">{html.escape(str(p.get("bytes","")))}</td>'
+            f'<td style="color:#ccc;word-break:break-all;font-size:12px;padding:3px 8px">{html.escape(str(p.get("msg","")))}</td>'
+            f'<td style="color:#555;word-break:break-all;font-size:11px;padding:3px 8px">{html.escape(str(p.get("chain","")))}</td>'
+            f'</tr>'
+        )
+    if not rows:
+        rows = '<tr><td colspan="5" style="color:#555;font-style:italic;padding:6px 8px">no packets captured</td></tr>'
+    trace_html += (
+        f'<details open><summary style="cursor:pointer;font-size:14px;font-weight:bold;'
+        f'color:#e0e0e0;padding:8px 0">{html.escape(role)} &mdash; {ip_part}{html.escape(label)}</summary>'
+        f'<table style="width:100%;border-collapse:collapse;font-family:monospace;font-size:12px">'
+        f'<thead><tr style="color:#666;border-bottom:1px solid #333">'
+        f'<th style="text-align:left;padding:4px 8px">Timestamp</th>'
+        f'<th style="text-align:left;padding:4px 8px">Action</th>'
+        f'<th style="text-align:left;padding:4px 8px">Bytes</th>'
+        f'<th style="text-align:left;padding:4px 8px">Message</th>'
+        f'<th style="text-align:left;padding:4px 8px">Chain</th>'
+        f'</tr></thead><tbody>{rows}</tbody></table></details>'
+    )
+
+bw_s   = fmt_bytes(bw)
+bud_s  = fmt_bytes(budget)
+util_s = f'{bw/budget*100:.1f}%'    if (bw and budget and budget > 0) else '--'
+dr_s   = f'{dropped/seen*100:.1f}%' if (dropped is not None and seen and seen > 0) else '--'
+e2e_s  = f'{e2e:.0f} ms'            if e2e    is not None else '--'
+relb_s = fmt_bytes(relayb)
+
+def cw_row(lbl, val):
+    return (f'<tr><td style="color:#888;padding:3px 14px;width:240px">{html.escape(lbl)}</td>'
+            f'<td style="text-align:right;padding:3px 14px">{html.escape(str(val))}</td></tr>')
+
+cw_html = (
+    '<table style="border-collapse:collapse;font-family:monospace;font-size:13px">'
+    '<tbody>'
+    + cw_row('Gossip Bandwidth (5m)',   bw_s)
+    + cw_row('Gossip Budget/window',    bud_s)
+    + cw_row('Bandwidth Utilization',   util_s)
+    + cw_row('Messages Seen',           fv(seen,     '%.0f'))
+    + cw_row('Messages Dropped',        fv(dropped,  '%.0f'))
+    + cw_row('Drop Rate',               dr_s)
+    + cw_row('Lazy Repairs (IWant)',    fv(repairs,  '%.0f'))
+    + cw_row('DHT Node Count (avg)',    fv(dht,      '%.1f'))
+    + cw_row('Eager Peers/node',        fv(eager,    '%.1f'))
+    + cw_row('Lazy Peers/node',         fv(lazy_p,   '%.1f'))
+    + cw_row('Circuit Builds (5m)',     fv(circuits, '%.0f'))
+    + cw_row('E2E Chunk Latency',       e2e_s)
+    + cw_row('Relay Bytes Forwarded',   relb_s)
+    + cw_row('Publisher Chunks Recv',   fv(pubchk,   '%.0f'))
+    + cw_row('Bootstrap Results',       fv(boot,     '%.0f'))
+    + '</tbody></table>'
+)
+
+doc = f'''<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>GBN SendDummy Report \u2014 {html.escape(ts_now)}</title>
+  <style>
+    body {{ background:#1a1a1a; color:#d4d4d4; font-family:monospace; margin:0; padding:24px 32px; }}
+    h1 {{ color:#e8e8e8; border-bottom:1px solid #333; padding-bottom:10px; margin-bottom:20px; }}
+    h2 {{ color:#b0b0b0; margin-top:28px; margin-bottom:8px; font-size:15px; letter-spacing:.5px; }}
+    table tr:hover {{ background:#222; }}
+    .chain {{ background:#0d2b0d; border:1px solid #2d5a2d; padding:8px 14px;
+              border-radius:4px; color:#7ec87e; font-size:13px;
+              word-break:break-all; margin:8px 0 16px 0; }}
+    details {{ margin:10px 0; border:1px solid #2a2a2a; border-radius:4px; padding:6px 12px; }}
+    table td, table th {{ border-bottom:1px solid #242424; }}
+  </style>
+</head>
+<body>
+  <h1>GBN SendDummy Report</h1>
+  <h2>Run Summary</h2>
+  <table style="border-collapse:collapse;font-size:13px">
+    <tr><td style="color:#888;padding:3px 14px;width:120px">Stack</td><td>{html.escape(stack)}</td></tr>
+    <tr><td style="color:#888;padding:3px 14px">Cluster</td><td>{html.escape(cluster)}</td></tr>
+    <tr><td style="color:#888;padding:3px 14px">Timestamp</td><td>{html.escape(ts_now)}</td></tr>
+    <tr><td style="color:#888;padding:3px 14px">Payload</td><td>{html.escape(size)} bytes</td></tr>
+  </table>
+  <h2>Circuit</h2>
+  <table style="border-collapse:collapse;font-size:13px">
+    <thead><tr style="color:#666">
+      <th style="text-align:left;padding:3px 14px;width:80px">Hop</th>
+      <th style="text-align:left;padding:3px 14px">Node</th>
+    </tr></thead>
+    <tbody>
+      <tr><td style="color:#888;padding:3px 14px">Creator</td><td>{html.escape(lbl_creator)}</td></tr>
+      <tr><td style="color:#888;padding:3px 14px">Guard</td><td>{html.escape(ip_guard)} &nbsp; {html.escape(lbl_guard)}</td></tr>
+      <tr><td style="color:#888;padding:3px 14px">Middle</td><td>{html.escape(ip_middle)} &nbsp; {html.escape(lbl_middle)}</td></tr>
+      <tr><td style="color:#888;padding:3px 14px">Exit</td><td>{html.escape(ip_exit)} &nbsp; {html.escape(lbl_exit)}</td></tr>
+      <tr><td style="color:#888;padding:3px 14px">Publisher</td><td>{html.escape(lbl_pub)}</td></tr>
+    </tbody>
+  </table>
+  <h2>Chain ID</h2>
+  <div class="chain">{html.escape(chain_id)}</div>
+  <h2>Trace Timeline</h2>
+  {trace_html}
+  <h2>CloudWatch Snapshot <span style="font-size:11px;color:#555">(last 5 min @ {html.escape(ts_now)})</span></h2>
+  {cw_html}
+</body>
+</html>'''
+
+with open(report_file, 'w', encoding='utf-8') as f:
+    f.write(doc)
+print(f'  Report saved: {report_file}')
+PYEOF
+
+  rm -rf "$cw_tmp"
 }
 
 do_check_images() {
@@ -800,13 +1175,14 @@ main() {
 
   while true; do
     echo "Command:"
-    select CMD in "DumpDht" "DumpMetadata" "BroadcastSeed" "UnicastDHT" "SendDummy" "checkimages" "Refresh nodes" "Exit"; do
+    select CMD in "DumpDht" "DumpMetadata" "BroadcastSeed" "UnicastDHT" "SendDummy" "LiveMetrics" "checkimages" "Refresh nodes" "Exit"; do
       case "$CMD" in
         DumpDht)           do_dump_dht ;;
         DumpMetadata)      do_dump_metadata ;;
         BroadcastSeed)     do_broadcast_seed ;;
         UnicastDHT)        do_unicast_dht ;;
         SendDummy)         do_send_dummy ;;
+        LiveMetrics)       do_live_metrics ;;
         checkimages)       do_check_images ;;
         "Refresh nodes")   NODE_LABELS=(); NODE_DESCS=(); NODE_IPS=(); NODE_ROLES=()
                            discover_all_nodes; print_node_table ;;

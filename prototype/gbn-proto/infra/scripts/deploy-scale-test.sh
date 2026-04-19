@@ -36,6 +36,7 @@ REGION="${3:-us-east-1}"
 POLL_INTERVAL_SECONDS="${POLL_INTERVAL_SECONDS:-10}"
 POLL_TIMEOUT_SECONDS="${POLL_TIMEOUT_SECONDS:-1200}"
 SEED_PERCENT="${SEED_PERCENT:-30}"
+SMOKE_TOPOLOGY="${SMOKE_TOPOLOGY:-0}"
 SEED_RELAY_KEY_NAME="${SEED_RELAY_KEY_NAME:-}"
 ADMIN_CIDR="${ADMIN_CIDR:-0.0.0.0/0}"
 RESTART_STATIC_NODES="${RESTART_STATIC_NODES:-1}"
@@ -210,6 +211,11 @@ echo "  GBN Phase 1 — Deploy Scale Test"
 echo "  Stack:  $STACK_NAME"
 echo "  Scale:  $SCALE_TARGET"
 echo "  Region: $REGION"
+if [ "$SMOKE_TOPOLOGY" = "1" ]; then
+  echo "  Mode:   smoke topology override"
+else
+  echo "  Mode:   seeded scale deployment"
+fi
 echo "============================================"
 
 echo "[1/6] Generating static cryptographic keys..."
@@ -332,7 +338,7 @@ if [ "$FREE_SEED" -lt 1 ]; then FREE_SEED=1; fi
 FULL_HOSTILE=$((SCALE_TARGET * 9 / 10))
 FULL_FREE=$((SCALE_TARGET - FULL_HOSTILE))
 
-if [ "${SMOKE_TOPOLOGY:-1}" = "1" ]; then
+if [ "$SMOKE_TOPOLOGY" = "1" ]; then
   # Smoke test topology override:
   HOSTILE_SEED=2
   FREE_SEED=1
@@ -341,18 +347,24 @@ fi
 
 GATE_SEED_TASKS=$((HOSTILE_SEED + FREE_SEED))
 
-echo "[5/7] Scaling to Smoke Test setup (2 Hostile, 1 Free) + 1 Creator..."
+if [ "$SMOKE_TOPOLOGY" = "1" ]; then
+  echo "[5/7] Scaling to smoke topology (2 hostile, 1 free) + 1 creator..."
+else
+  echo "[5/7] Scaling to seed topology + 1 creator..."
+  echo "  Seed percent:   $SEED_PERCENT%"
+  echo "  Seed relay:     1 static EC2 node (unchanged)"
+fi
 echo "  Hostile relays: $HOSTILE_SEED"
 echo "  Free relays:    $FREE_SEED"
 redeploy_service "$CLUSTER_NAME" "$HOSTILE_SERVICE_NAME" "$HOSTILE_SEED"
 redeploy_service "$CLUSTER_NAME" "$FREE_SERVICE_NAME" "$FREE_SEED"
 if [ -n "$CREATOR_SERVICE_NAME" ] && [ "$CREATOR_SERVICE_NAME" != "None" ]; then
   redeploy_service "$CLUSTER_NAME" "$CREATOR_SERVICE_NAME" 1
-  echo "  Creator: 1"
+echo "  Creator: 1"
 fi
 
 echo "[6/7] Stabilization Gate 1 (ECS running tasks >= 90% seed; BootstrapResult for diagnostics)..."
-if [ "${SMOKE_TOPOLOGY:-0}" = "1" ]; then
+if [ "$SMOKE_TOPOLOGY" = "1" ]; then
   SEED_THRESHOLD=$((GATE_SEED_TASKS))
 else
   SEED_THRESHOLD=$((GATE_SEED_TASKS * 90 / 100))
@@ -393,7 +405,7 @@ while true; do
   sleep "$POLL_INTERVAL_SECONDS"
 done
 
-if [ "${SMOKE_TOPOLOGY:-0}" = "1" ]; then
+if [ "$SMOKE_TOPOLOGY" = "1" ]; then
   echo "[7/7] Smoke topology active: skipping full-scale expansion."
   echo "  Hostile retained: $HOSTILE_SEED"
   echo "  Free retained:    $FREE_SEED"

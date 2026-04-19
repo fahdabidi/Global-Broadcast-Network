@@ -158,6 +158,22 @@ Creator must listen on an ACK port; return_path contains Creator's ack address.
 
 ---
 
+## Size of Onion Packet
+SNOW encryptiom library has a 64KiB size limit. So we break payloads into 8Kib Chunks and transmit individually. Table below shows how payload size increases after onion layering. 
+
+```text
++-----------------+------------------------+--------------------------------+--------------------------+-----------------------+------------------------------------+
+| Step            | Incoming payload bytes | Encoded incoming payload bytes | New header/wrapper bytes | Total plaintext bytes | Size after encryption to next step |
++-----------------+------------------------+--------------------------------+--------------------------+-----------------------+------------------------------------+
+| ChunkPayload    | 16,384                 | 21,848                         | 840                      | 22,688                | n/a                                |
+| Publisher layer | 22,688                 | 30,252                         | 259                      | 30,511                | 30,559                             |
+| Exit layer      | 30,559                 | 40,748                         | 270                      | 41,018                | 41,066                             |
+| Middle layer    | 41,066                 | 54,756                         | 272                      | 55,028                | 55,076                             |
+| Guard layer     | 55,076                 | 73,436                         | 271                      | 73,707                | seal failed                        |
++-----------------+------------------------+--------------------------------+--------------------------+-----------------------+------------------------------------+
+```
+#TODO Currently the packet size decreases as the packet traverses the Onion Network relay to relay, this can provide a good guess on who the Creator was. We need to make packets uniform in size across Onion layers to hide Creator identify. 
+
 ### Gossip Network Design
 
 Every node in the GBN relay network participates in a **PlumTree epidemic broadcast** protocol (implemented over libp2p request/response) to maintain a shared, eventually-consistent directory of all reachable nodes.
@@ -254,15 +270,46 @@ Viewer       â†’ Sees: playable stream/content
 
 ### Prototype components in this workspace
 
-| Component | Purpose (prototype scope) |
-|---|---|
-| `gbn-protocol` | Shared types/contracts (chunks, manifests, crypto/error primitives) |
-| `mcn-sanitizer` | Metadata sanitization pipeline |
-| `mcn-chunker` | Chunking and hash-oriented segmentation |
-| `mcn-crypto` | Key exchange + encryption flow |
-| `mcn-router-sim` | Telescopic Onion Router simulation over Kademlia DHT |
-| `mpub-receiver` | Publisher-side receive/reassemble prototype path |
-| `proto-cli` | CLI orchestrator for prototype workflows |
+| Component | Purpose (prototype scope) | Primary use in this prototype |
+|---|---|---|
+| `gbn-protocol` | Shared wire types and serialization contracts for chunks, manifests, onion routing, DHT, and crypto payloads | Common dependency used across every service role |
+| `mcn-sanitizer` | Media sanitization pipeline and FFmpeg-based metadata stripping | Creator-side preprocessing before chunking/upload |
+| `mcn-chunker` | Chunking, hashing, and manifest-oriented segmentation helpers | Creator-side chunk generation and integrity bookkeeping |
+| `mcn-crypto` | Publisher key generation, upload-session encryption, and Noise-based onion seal/open helpers | Creator and publisher cryptographic flow |
+| `mcn-router-sim` | Gossip/DHT, relay control plane, telescopic onion routing, ACK relay path, and distributed trace metadata | Relay, creator, seed relay, and transport orchestration |
+| `mpub-receiver` | Publisher-side onion terminal receive path, chunk acceptance, transport ACK generation, and session completion tracking | Publisher role runtime |
+| `proto-cli` | The `gbn-proto` binary entrypoint that wires all crates together into runnable commands and service modes | Single executable used by the prototype containers and local CLI |
+
+### Phase Prototype Image Mapping
+
+Both prototype Dockerfiles currently compile the same binary:
+
+```bash
+cargo build --release --bin gbn-proto --features distributed-trace
+```
+
+That means both images currently link the full workspace transitively through `proto-cli`.
+
+| Component | `gbn-relay` image | `gbn-publisher` image | Notes |
+|---|---|---|---|
+| `gbn-protocol` | Yes | Yes | Shared dependency of the single `gbn-proto` binary |
+| `mcn-sanitizer` | Yes | Yes | Linked through `proto-cli`, even if not exercised by every runtime role |
+| `mcn-chunker` | Yes | Yes | Linked through `proto-cli` |
+| `mcn-crypto` | Yes | Yes | Linked through `proto-cli` |
+| `mcn-router-sim` | Yes | Yes | Linked through `proto-cli` |
+| `mpub-receiver` | Yes | Yes | Linked through `proto-cli` |
+| `proto-cli` | Yes | Yes | Defines the `gbn-proto` binary built into both images |
+
+### Current Phase Stack Runtime Usage
+
+| Runtime role in `phase1-scale-stack.yaml` | Image currently used | Notes |
+|---|---|---|
+| `SeedRelayInstance` | `gbn-relay` | Static EC2 bootstrap relay; kept as the single seed relay for network bring-up |
+| `HostileRelayService` | `gbn-relay` | ECS/Fargate relay tasks in hostile subnet |
+| `FreeRelayService` | `gbn-relay` | ECS/Fargate relay tasks in free subnet |
+| `CreatorService` | `gbn-relay` | ECS/Fargate creator role also runs the same `gbn-proto` binary image |
+| `PublisherInstance` | `gbn-relay` | Current stack still launches publisher mode from the relay image |
+| `gbn-publisher` ECR image | Built and published, but not wired into the current phase stack | `Dockerfile.publisher` exists, but `phase1-scale-stack.yaml` does not currently launch the publisher instance from `ContainerImagePublisher` |
 
 ---
 
