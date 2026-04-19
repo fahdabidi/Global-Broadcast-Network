@@ -39,3 +39,6 @@ run_smoke_probe.sh
 probe_creator_to_relay.sh
 tmp_debug_info.sh
 /; done
+
+# SendDummy HTML reports
+infra/scripts/reports/

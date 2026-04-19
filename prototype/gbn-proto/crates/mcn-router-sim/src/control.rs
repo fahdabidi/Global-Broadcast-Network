@@ -80,7 +80,7 @@ fn next_chain(parent: &str) -> String {
     }
 }
 
-const SEND_DUMMY_FRAGMENT_SIZE: usize = 16 * 1024;
+const SEND_DUMMY_FRAGMENT_SIZE: usize = 8 * 1024;
 
 fn now_millis() -> u64 {
     std::time::SystemTime::now()

@@ -28,6 +28,10 @@ use crate::relay_engine::{read_raw_frame, write_raw_frame};
 
 pub type ChunkBytes = Vec<u8>;
 
+// Noise_N_25519_ChaChaPoly_BLAKE2s single-message limit:
+// 65535 total bytes minus 32-byte ephemeral public key minus 16-byte AEAD tag.
+const SNOW_N_MAX_PLAINTEXT_BYTES: usize = 65_487;
+
 /// Relay descriptor used in local DHT/seed-store views.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RelayNode {
@@ -221,6 +225,16 @@ fn seal_layer_for_hop(
         )
     })?;
     let plaintext_len = bytes.len();
+    anyhow::ensure!(
+        plaintext_len <= SNOW_N_MAX_PLAINTEXT_BYTES,
+        "Refusing to seal onion layer stage={} hop={} next_hop={:?}: plaintext_bytes={} exceeds snow_limit={} (inner_bytes={})",
+        stage,
+        hop.addr,
+        next_hop,
+        plaintext_len,
+        SNOW_N_MAX_PLAINTEXT_BYTES,
+        inner_len
+    );
     seal(&hop.identity_pub, &bytes).with_context(|| {
         format!(
             "Failed sealing onion layer stage={} hop={} next_hop={:?} plaintext_bytes={} inner_bytes={}",
