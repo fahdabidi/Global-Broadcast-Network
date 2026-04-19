@@ -34,6 +34,9 @@ Thumbs.db
 tmp_*.sh
 tmp_*.ps1
 tmp-ssm-*.json
+/crates/mcn-router-sim/tests/tmp_*.rs
+/tmp-experiments/*
+!/tmp-experiments/.gitkeep
 results/
 run_smoke_probe.sh
 probe_creator_to_relay.sh
