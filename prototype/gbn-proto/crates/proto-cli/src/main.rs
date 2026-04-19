@@ -569,7 +569,7 @@ async fn main() -> Result<()> {
                 }
 
                 "creator" => {
-                    let mut trace_chain = String::new();
+                    let trace_chain = String::new();
                     // P2: Gossip swarm + background circuit build + upload
                     let local_key = libp2p::identity::Keypair::generate_ed25519();
                     let c = trace_input(&trace_chain, "mcn-router-sim", "swarm::build_swarm", "role=creator");
@@ -581,7 +581,6 @@ async fn main() -> Result<()> {
                     let c2 = trace_input(&c, "mcn-router-sim", "GossipRuntime::from_env", "role=creator");
                     let mut runtime = swarm::GossipRuntime::from_env(seed_store.clone()).await;
                     trace_output(&c2, "mcn-router-sim", "GossipRuntime::from_env", "ok", 0);
-                    trace_chain = c2;
 
                     let circuit_delay_secs: u64 = std::env::var("GBN_CIRCUIT_DELAY_SECS")
                         .ok()
@@ -635,11 +634,11 @@ async fn main() -> Result<()> {
                     let c = trace_input(
                         &trace_chain,
                         "mpub-receiver",
-                        "Receiver::new",
+                        "Receiver::new_onion_terminal",
                         &format!("listen_addr={listen_addr}"),
                     );
-                    let receiver = Receiver::new(vec![listen_addr]);
-                    trace_output(&c, "mpub-receiver", "Receiver::new", "ok", 0);
+                    let receiver = Receiver::new_onion_terminal(vec![listen_addr], seed);
+                    trace_output(&c, "mpub-receiver", "Receiver::new_onion_terminal", "ok", 0);
                     let c2 = trace_input(&c, "mpub-receiver", "Receiver::start", "async_start");
                     let mut handle = receiver.start().await.map_err(|e| {
                         trace_error(&c2, "mpub-receiver", "Receiver::start", &e.to_string());
@@ -1013,7 +1012,35 @@ async fn run_creator_upload(target_circuits: usize, seed_store: Arc<RwLock<HashM
         tokio::time::sleep(Duration::from_secs(DISCOVERY_RETRY_SECS)).await;
     };
 
-    // 4. Build circuits speculatively (30 concurrent dials, keep first `target_circuits`)
+    // 4. Discover Publisher address + X25519 pubkey (Static)
+    let c = trace_input(
+        &trace_chain,
+        "mcn-router-sim",
+        "discover_publisher_static",
+        "static-seed",
+    );
+    let (publisher_addr, pub_key_bytes) = swarm::discover_publisher_static()
+        .await
+        .map_err(|e| {
+            trace_error(&c, "mcn-router-sim", "discover_publisher_static", &e.to_string());
+            e
+        })
+        .context("Creator: failed to discover Publisher from static env configuration")?;
+    trace_output(
+        &c,
+        "mcn-router-sim",
+        "discover_publisher_static",
+        &format!("addr={} pubkey={}", publisher_addr, hex::encode(pub_key_bytes)),
+        pub_key_bytes.len(),
+    );
+    trace_chain = c;
+    tracing::info!(
+        "Creator: discovered Publisher at {}, pubkey={}",
+        publisher_addr,
+        hex::encode(pub_key_bytes)
+    );
+
+    // 5. Build circuits speculatively (30 concurrent dials, keep first `target_circuits`)
     tracing::info!(
         "Creator: building {} circuits (30 concurrent speculative dials)...",
         target_circuits
@@ -1033,6 +1060,8 @@ async fn run_creator_upload(target_circuits: usize, seed_store: Arc<RwLock<HashM
         &noise_priv_key,
         &all_relays,
         &exit_candidates,
+        publisher_addr,
+        pub_key_bytes,
         target_circuits,
         30,
     )
@@ -1060,36 +1089,9 @@ async fn run_creator_upload(target_circuits: usize, seed_store: Arc<RwLock<HashM
         anyhow::bail!("Creator: build_circuits_speculative returned 0 circuits — all dial attempts timed out or failed");
     }
 
-    // 5. Verify path disjointness (test spec §5.5)
+    // 6. Verify path disjointness (test spec §5.5)
     let diversity_ok = log_path_diversity(&circuits);
     publish_path_diversity_from_env(diversity_ok).await;
-
-    // 6. Discover Publisher address + X25519 pubkey (Static)
-    let c = trace_input(
-        &trace_chain,
-        "mcn-router-sim",
-        "discover_publisher_static",
-        "static-seed",
-    );
-    let (_, pub_key_bytes) = swarm::discover_publisher_static()
-        .await
-        .map_err(|e| {
-            trace_error(&c, "mcn-router-sim", "discover_publisher_static", &e.to_string());
-            e
-        })
-        .context("Creator: failed to discover Publisher from static env configuration")?;
-    trace_output(
-        &c,
-        "mcn-router-sim",
-        "discover_publisher_static",
-        &format!("pubkey={}", hex::encode(pub_key_bytes)),
-        pub_key_bytes.len(),
-    );
-    trace_chain = c;
-    tracing::info!(
-        "Creator: discovered Publisher, pubkey={}",
-        hex::encode(pub_key_bytes)
-    );
 
     // 7. Generate deterministic synthetic payload (same seed as Publisher uses for verification)
     let upload_size: usize = std::env::var("GBN_UPLOAD_SIZE_BYTES")

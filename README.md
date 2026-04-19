@@ -77,7 +77,7 @@ The **Global Broadcast Network** aims to provide a complete, end-to-end pipeline
 
 ## How It Works
 
-**The Root of Trust:** The user journey strictly begins prior to recording the video. The Creator must first establish cryptographic trust by scanning the Publisher's Public Key via a QR code (or by downloading a pre-seeded Sovereign Publisher App). This ensures the MCN encrypts data specifically for that Publisher and structurally prevents adversary traffic interception.
+**The Root of Trust:** The user journey strictly begins prior to recording the video. The Creator must first establish cryptographic trust by scanning the Publisher's Public Key via a QR code (or by downloading a pre-seeded Sovereign Publisher App). Additionally to seed the network the Publisher must provide (or the Creator must aquire) a few exit relays, located outside the geofence, that can connect to the Publisher to bypass Publisher geofencing. This ensures the MCN encrypts data specifically for that Publisher and structurally prevents adversary traffic interception.
 
 ### Journey of a Video
 
@@ -86,16 +86,16 @@ The **Global Broadcast Network** aims to provide a complete, end-to-end pipeline
   (hostile jurisdiction)       (3-hop onion routing)               (trusted entity)
 
  +---------------------+                                       +---------------------+
- | 1. Record video     |       +=======================+       | 5. Receive chunks   |
- | 2. Strip metadata   |       |  Path 1               |       |    (out-of-order)   |
+ | 1. Record video     |       +========================+       | 5. Receive chunks   |
+ | 2. Strip metadata   |       |  Path 1                |       |    (out-of-order)   |
  |    (GPS, device ID, |------>|  Guard > Middle > Exit |------>| 6. Decrypt each     |
- |     timestamps)     |       +=======================+       | 7. Verify BLAKE3    |
- | 3. Chunk (1MB each) |       +=======================+       | 8. Reassemble video |
+ |     timestamps)     |       +========================+       | 7. Verify BLAKE3    |
+ | 3. Chunk (1MB each) |       +========================+       | 8. Reassemble video |
  | 4. Encrypt chunks   |------>|  Path 2 (diff circuit) |------>| 9. Editorial review |
- |    (AES-256-GCM)    |       +=======================+       |10. Sign (Ed25519)   |
- |                     |       +=======================+       |                     |
+ |    (AES-256-GCM)    |       +=======================+        |10. Sign (Ed25519)   |
+ |                     |       +========================+       |                     |
  |                     |------>|  Path 3 (diff circuit) |------>|                     |
- +---------------------+       +=======================+       +----------+----------+
+ +---------------------+       +========================+       +----------+----------+
                                                                           |
                           GLOBAL DISTRIBUTED STORAGE                      |
                         +---------------------------------------------<---+
@@ -108,7 +108,7 @@ The **Global Broadcast Network** aims to provide a complete, end-to-end pipeline
  | can have many replicas                                                      |
  +-------------------------------------+----------------------------------------+
                                         |
-                          VIEWER         |
+                          VIEWER        |
                         +----------------+
                         |
                         v
@@ -116,16 +116,16 @@ The **Global Broadcast Network** aims to provide a complete, end-to-end pipeline
               | Discover content  |
               | via peer gossip   |
               |        |          |
-              | Fetch 14 of 20   |
-              | shards via BON   |
+              | Fetch 14 of 20    |
+              | shards via BON    |
               |        |          |
-              | Reconstruct and  |
-              | play video       |
+              | Reconstruct and   |
+              | play video        |
               +-------------------+
 ```
 
 
-## Packet Path
+## Publisher Flow Packet Path implemented in Current Prototype
 
 **Path/Return_Path**: Creator → Guard → Middle → Exit → Publisher
 
@@ -158,6 +158,74 @@ Creator must listen on an ACK port; return_path contains Creator's ack address.
 
 ---
 
+### Gossip Network Design
+
+Every node in the GBN relay network participates in a **PlumTree epidemic broadcast** protocol (implemented over libp2p request/response) to maintain a shared, eventually-consistent directory of all reachable nodes.
+
+**What is gossiped:**
+
+| Message Type | Content |
+|---|---|
+| `NodeAnnounce` | A single node's address, public key, role (relay / seed / creator / publisher), and capabilities |
+| `DirectorySync` | A batch of `RelayNode` entries — used for initial catch-up when a new node joins |
+
+**How PlumTree works:**
+
+PlumTree separates peers into two sets per node:
+
+- **Eager peers** — receive full message payloads immediately (push)
+- **Lazy peers** — receive only `IHave` message-ID announcements; they pull (`IWant`) only if the payload hasn't arrived via an eager path first
+
+This keeps redundant traffic low under normal conditions while guaranteeing delivery: if the eager path fails, a lazy peer's `IHave` triggers repair. Peers are promoted/demoted between eager and lazy sets dynamically (`Graft` / `Prune` messages) based on delivery performance.
+
+**Deduplication:** Each message carries a 32-byte `MessageId` (content hash). Every node tracks a sliding window of seen IDs; duplicate deliveries are dropped immediately.
+
+**Rate limiting:** Each node enforces a token-bucket bandwidth budget on outbound gossip to prevent a single announcement storm from saturating the network under high churn (validated at N=100 nodes on ECS Fargate — Phase 1 result).
+
+**Propagation diagram:**
+
+```
+  A relay node announces itself: NodeAnnounce { addr, pub_key, role }
+
+                        +--------------+
+                        |  Originator  |
+                        +------+-------+
+            +------------------+------------------+
+     eager push           eager push           IHave only
+     (full payload)       (full payload)     (message-ID)
+            |                  |                   :
+            v                  v                   :
+     +------------+    +--------------+    +--------------+
+     |  Seed Node |    |   Guard A    |    |   Guard B    |
+     +-----+------+    +------+-------+    +------+-------+
+           |                  |                   | IWant (not yet seen)
+    eager  |  lazy        eager|                  v
+           v  : : :>           v           +-----------------+
+     +---------+  IHave  +----------+      | full payload    |
+     | Creator |         |  Middle  |      | pulled on-demand|
+     +---------+         +----+-----+      +-----------------+
+                              | eager
+                              v
+                        +----------+
+                        |   Exit   |
+                        +----------+
+
+  --- full payload pushed immediately to eager peers
+  : : IHave (message-ID only); receiver sends IWant to pull if not yet seen
+
+  All nodes converge on an identical DHT view.
+```
+**How the Creator uses the gossip DHT:**
+
+When a Creator wants to send, it queries its local in-memory DHT (populated by gossip) to find candidate nodes by role:
+- **Guard** — any `HostileRelay` or `SeedRelay`
+- **Middle** — same pool, Guard excluded
+- **Exit** — `FreeRelay` only - outside the Geofence, Identified by the Publisher as reachable by it
+- **Publisher** — the well-known Publisher address learned from initial seeding
+
+The Creator selects one node per hop and builds the onion circuit entirely from local DHT state — no network round-trips are needed for path selection.
+
+---
 
 ### What each participant can observe
 

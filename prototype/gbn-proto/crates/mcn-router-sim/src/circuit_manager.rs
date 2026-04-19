@@ -60,8 +60,10 @@ pub struct OnionCircuit {
     pub guard_addr: SocketAddr,
     pub middle_addr: SocketAddr,
     pub exit_addr: SocketAddr,
+    pub publisher_addr: SocketAddr,
     creator_priv_key: [u8; 32],
     creator_info: HopInfo,
+    publisher_info: HopInfo,
     trace_id: String,
 }
 
@@ -115,6 +117,8 @@ pub async fn build_circuit(
     guard: &RelayNode,
     middle: &RelayNode,
     exit: &RelayNode,
+    publisher_addr: SocketAddr,
+    publisher_pub_key: [u8; 32],
     trace_id: &str,
 ) -> Result<OnionCircuit> {
     let started = tokio::time::Instant::now();
@@ -154,8 +158,13 @@ pub async fn build_circuit(
             guard_addr: guard.addr,
             middle_addr: middle.addr,
             exit_addr: exit.addr,
+            publisher_addr,
             creator_priv_key: *creator_priv_key,
             creator_info,
+            publisher_info: HopInfo {
+                addr: publisher_addr,
+                identity_pub: publisher_pub_key,
+            },
             trace_id: base_trace.clone(),
         })
     }
@@ -250,6 +259,7 @@ async fn send_chunk_via_circuit(
     let mut return_path = Vec::with_capacity(circuit.path.len() + 1);
     return_path.push(circuit.creator_info.clone());
     return_path.extend(circuit.path.clone());
+    return_path.push(circuit.publisher_info.clone());
 
     let mut hop_layer_traces = Vec::with_capacity(circuit.path.len());
     let mut trace_cursor = chunk_trace_base.clone();
@@ -282,17 +292,13 @@ async fn send_chunk_via_circuit(
         )
     })?;
 
-    let final_hop_idx = circuit.path.len() - 1;
-    let final_stage = hop_stage_label(final_hop_idx, circuit.path.len());
+    let publisher_stage = "publisher";
     let mut sealed = seal_layer_for_hop(
-        &circuit.path[final_hop_idx],
+        &circuit.publisher_info,
         None,
         terminal_payload_bytes,
-        hop_layer_traces
-            .get(final_hop_idx)
-            .map(String::as_str)
-            .unwrap_or(""),
-        &final_stage,
+        &payload_trace,
+        publisher_stage,
     )
     .map_err(|e| {
         push_packet_meta_trace(
@@ -300,7 +306,7 @@ async fn send_chunk_via_circuit(
             payload_len,
             &format!(
                 "circuit.send_chunk ERROR stage={} hop={} chunk_id={} err={e:#}",
-                final_stage, circuit.path[final_hop_idx].addr, chunk_id
+                publisher_stage, circuit.publisher_addr, chunk_id
             ),
             &next_chain(&send_input_chain),
             "circuit.error",
@@ -308,9 +314,13 @@ async fn send_chunk_via_circuit(
         e
     })?;
 
-    for idx in (0..final_hop_idx).rev() {
+    for idx in (0..circuit.path.len()).rev() {
         let hop = &circuit.path[idx];
-        let next_addr = circuit.path[idx + 1].addr;
+        let next_addr = if idx + 1 < circuit.path.len() {
+            circuit.path[idx + 1].addr
+        } else {
+            circuit.publisher_addr
+        };
         let stage = hop_stage_label(idx, circuit.path.len());
         sealed = seal_layer_for_hop(
             hop,
@@ -585,6 +595,8 @@ pub async fn build_circuits_speculative(
     creator_priv_key: &[u8; 32],
     all_peers: &[RelayNode],
     exit_candidates: &[RelayNode],
+    publisher_addr: SocketAddr,
+    publisher_pub_key: [u8; 32],
     target_count: usize,
     max_concurrent: usize,
 ) -> Result<Vec<OnionCircuit>> {
@@ -609,7 +621,16 @@ pub async fn build_circuits_speculative(
             exit.addr
         );
         let candidate =
-            build_circuit(creator_priv_key, &guard, &middle, &exit, &candidate_trace).await?;
+            build_circuit(
+                creator_priv_key,
+                &guard,
+                &middle,
+                &exit,
+                publisher_addr,
+                publisher_pub_key,
+                &candidate_trace,
+            )
+            .await?;
         let addrs = [candidate.guard_addr, candidate.middle_addr, candidate.exit_addr];
         if addrs.iter().any(|addr| used_relay_addrs.contains(addr)) {
             continue;
@@ -640,6 +661,8 @@ pub async fn build_circuits_speculative(
 pub async fn build_circuits_speculative_from_descriptors(
     creator_priv_key: &[u8; 32],
     descriptors: &[RelayDescriptor],
+    publisher_addr: SocketAddr,
+    publisher_pub_key: [u8; 32],
     target_count: usize,
     max_concurrent: usize,
 ) -> Result<Vec<OnionCircuit>> {
@@ -649,6 +672,8 @@ pub async fn build_circuits_speculative_from_descriptors(
         creator_priv_key,
         &all_peers,
         &exit_candidates,
+        publisher_addr,
+        publisher_pub_key,
         target_count,
         max_concurrent,
     )

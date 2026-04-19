@@ -2575,6 +2575,7 @@ dependencies = [
  "hex",
  "mcn-chunker",
  "mcn-crypto",
+ "mcn-router-sim",
  "serde",
  "serde_json",
  "tempfile",

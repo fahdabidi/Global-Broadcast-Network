@@ -4,13 +4,13 @@
 //! - Read one framed ciphertext from upstream.
 //! - Open one onion layer with local static key (Noise_N).
 //! - If `next_hop` exists, forward inner bytes to that hop and relay ACK back.
-//! - If `next_hop` is `None`, process terminal `ChunkPayload` and return ACK.
+//! - If `next_hop` is `None`, reject the frame; the Publisher is the terminal
+//!   recipient and the origin of the delivery ACK.
 
 use crate::control::push_packet_meta_trace;
-use crate::observability::publish_chunks_received_from_env;
 use anyhow::{Context, Result};
-use gbn_protocol::onion::{AckPayload, ChunkPayload, OnionLayer};
-use mcn_crypto::noise::{open, seal};
+use gbn_protocol::onion::OnionLayer;
+use mcn_crypto::noise::open;
 use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -290,118 +290,20 @@ async fn handle_onion_connection(mut upstream: TcpStream, local_priv_key: [u8; 3
             );
         }
         None => {
-            // Terminal destination for this onion message.
-            let payload: ChunkPayload =
-                serde_json::from_slice(&layer.inner)
-                    .context("Failed to decode ChunkPayload")
-                    .map_err(|e| {
-                        push_packet_meta_trace(
-                            "ComponentError",
-                            layer.inner.len(),
-                            &format!("relay.decode_payload ERROR err={e:#}"),
-                            &ingress_chain,
-                            "relay.error",
-                        );
-                        e
-                    })?;
-            let payload_chain = payload
-                .trace_id
-                .clone()
-                .unwrap_or_else(|| next_chain(&ingress_chain));
-
-            let got_hash = *blake3::hash(&payload.chunk).as_bytes();
-            if got_hash != payload.hash {
-                push_packet_meta_trace(
-                    "ComponentError",
-                    payload.chunk.len(),
-                    &format!(
-                        "relay.hash_mismatch ERROR node={} chunk_id={} expected={} got={}",
-                        crate::trace::node_id(),
-                        payload.chunk_id,
-                        hex::encode(payload.hash),
-                        hex::encode(got_hash)
-                    ),
-                    &payload_chain,
-                    "relay.error",
-                );
-                anyhow::bail!(
-                    "Chunk hash mismatch at destination: expected {}, got {}",
-                    hex::encode(payload.hash),
-                    hex::encode(got_hash)
-                );
-            }
-
-            // Compatibility bridge: in existing Phase-2 flow, terminal relay still
-            // forwards chunk bytes to mpub-receiver when publisher address is known.
-            if let Ok(publisher_addr) = crate::swarm::discover_publisher_addr_for_exit_relay().await {
-                if let Err(e) = forward_terminal_chunk_to_publisher(publisher_addr, &payload.chunk).await {
-                    tracing::warn!(
-                        "Destination relay failed forwarding chunk to Publisher {}: {e:#}",
-                        publisher_addr
-                    );
-                    push_packet_meta_trace(
-                        "ComponentError",
-                        payload.chunk.len(),
-                        &format!(
-                            "relay.forward_publisher ERROR node={} publisher={} chunk_id={} err={e:#}",
-                            crate::trace::node_id(),
-                            publisher_addr,
-                            payload.chunk_id
-                        ),
-                        &payload_chain,
-                        "relay.error",
-                    );
-                }
-            }
-
-            push_packet_meta_trace(
-                "ExitDelivery",
-                payload.chunk.len(),
-                &format!(
-                    "relay.destination node={} chunk_id={} bytes={}",
-                    crate::trace::node_id(),
-                    payload.chunk_id,
-                    payload.chunk.len()
-                ),
-                &next_chain(&payload_chain),
-                "relay.data",
+            let terminal_chain = next_chain(&ingress_chain);
+            let msg = format!(
+                "relay.unexpected_terminal ERROR node={} bytes={} err=relay received next_hop=None; publisher must terminate the onion path",
+                crate::trace::node_id(),
+                layer.inner.len()
             );
-
-            tokio::spawn(async move {
-                publish_chunks_received_from_env(1).await;
-            });
-
-            let ack = build_ack_onion(&payload)?;
             push_packet_meta_trace(
-                "RelayAckBuild",
-                ack.len(),
-                &format!(
-                    "relay.ack_build node={} chunk_id={} return_hops={} bytes={}",
-                    crate::trace::node_id(),
-                    payload.chunk_id,
-                    payload.return_path.len(),
-                    ack.len()
-                ),
-                &next_chain(&payload_chain),
-                "relay.ack",
+                "ComponentError",
+                layer.inner.len(),
+                &msg,
+                &terminal_chain,
+                "relay.error",
             );
-            write_raw_frame(&mut upstream, &ack)
-                .await
-                .context("Failed writing terminal ACK to upstream")
-                .map_err(|e| {
-                    push_packet_meta_trace(
-                        "ComponentError",
-                        ack.len(),
-                        &format!(
-                            "relay.write_terminal_ack ERROR node={} chunk_id={} err={e:#}",
-                            crate::trace::node_id(),
-                            payload.chunk_id
-                        ),
-                        &next_chain(&payload_chain),
-                        "relay.error",
-                    );
-                    e
-                })?;
+            anyhow::bail!(msg);
         }
     }
 
@@ -417,13 +319,6 @@ fn peel_ack_for_upstream(
     Some((layer.inner, layer.trace_id))
 }
 
-fn now_millis() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
 fn next_chain(parent: &str) -> String {
     let hop = crate::trace::next_hop_id();
     if parent.is_empty() {
@@ -433,101 +328,4 @@ fn next_chain(parent: &str) -> String {
     } else {
         format!("{parent} -> {hop}")
     }
-}
-
-/// Build a reverse-direction layered ACK.
-///
-/// `return_path` format is:
-/// `[Creator, Guard, Middle, Exit, ... , Destination]`
-///
-/// The destination (current node) wraps for each prior hop in reverse order so
-/// the ACK can be peeled hop-by-hop on the way back to the creator.
-fn build_ack_onion(payload: &ChunkPayload) -> Result<Vec<u8>> {
-    anyhow::ensure!(
-        !payload.return_path.is_empty(),
-        "ACK build failed: empty return_path"
-    );
-
-    let mut ack_trace = payload.trace_id.clone().unwrap_or_default();
-    ack_trace = next_chain(&ack_trace);
-    let ack = AckPayload {
-        chunk_id: payload.chunk_id,
-        hash: payload.hash,
-        trace_id: if ack_trace.is_empty() {
-            None
-        } else {
-            Some(ack_trace.clone())
-        },
-        send_timestamp_ms: payload.send_timestamp_ms,
-        received_timestamp_ms: now_millis(),
-        total_chunks: payload.total_chunks,
-        chunk_index: payload.chunk_index,
-    };
-    let ack_bytes = serde_json::to_vec(&ack)?;
-
-    let creator = &payload.return_path[0];
-    let creator_layer = OnionLayer {
-        next_hop: None,
-        inner: ack_bytes,
-        trace_id: if ack_trace.is_empty() {
-            None
-        } else {
-            Some(next_chain(&ack_trace))
-        },
-    };
-    let creator_layer_bytes = serde_json::to_vec(&creator_layer)?;
-    let mut sealed = seal(&creator.identity_pub, &creator_layer_bytes)?;
-
-    let dest_idx = payload.return_path.len().saturating_sub(1);
-    let mut layer_trace = creator_layer
-        .trace_id
-        .clone()
-        .unwrap_or_else(|| ack_trace.clone());
-    for idx in 1..dest_idx {
-        let current = &payload.return_path[idx];
-        let next_addr = payload.return_path[idx - 1].addr;
-        layer_trace = next_chain(&layer_trace);
-        let layer = OnionLayer {
-            next_hop: Some(next_addr),
-            inner: sealed,
-            trace_id: if layer_trace.is_empty() {
-                None
-            } else {
-                Some(layer_trace.clone())
-            },
-        };
-        let layer_bytes = serde_json::to_vec(&layer)?;
-        sealed = seal(&current.identity_pub, &layer_bytes)?;
-    }
-
-    Ok(sealed)
-}
-
-async fn forward_terminal_chunk_to_publisher(
-    publisher_addr: SocketAddr,
-    chunk_bytes: &[u8],
-) -> Result<()> {
-    let mut pub_stream = timeout(Duration::from_secs(10), TcpStream::connect(publisher_addr))
-        .await
-        .context(format!(
-            "Timeout connecting to Publisher {} from destination relay",
-            publisher_addr
-        ))?
-        .context(format!(
-            "TCP connect to Publisher {} failed from destination relay",
-            publisher_addr
-        ))?;
-
-    // mpub-receiver wire format uses little-endian length prefix.
-    let len = chunk_bytes.len() as u32;
-    pub_stream
-        .write_all(&len.to_le_bytes())
-        .await
-        .context("Failed writing publisher length prefix")?;
-    pub_stream
-        .write_all(chunk_bytes)
-        .await
-        .context("Failed writing publisher chunk bytes")?;
-    pub_stream.flush().await?;
-    Ok(())
 }

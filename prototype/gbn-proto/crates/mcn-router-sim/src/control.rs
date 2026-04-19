@@ -511,6 +511,10 @@ async fn execute_send_dummy(
 
     let cm = CircuitManager::new();
 
+    let (publisher_addr, publisher_pub_key) = crate::swarm::discover_publisher_static()
+        .await
+        .context("SendDummy: failed to discover Publisher static endpoint")?;
+
     // 3. Build circuit
     chain = next_chain(&chain);
     push_packet_meta_trace(
@@ -529,6 +533,8 @@ async fn execute_send_dummy(
         &guard,
         &middle,
         &exit,
+        publisher_addr,
+        publisher_pub_key,
         &chain,
     ).await.map_err(|e| {
         push_packet_meta_trace(

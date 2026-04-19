@@ -9,6 +9,7 @@ license.workspace = true
 gbn-protocol = { path = "../gbn-protocol" }
 mcn-crypto = { path = "../mcn-crypto" }
 mcn-chunker = { path = "../mcn-chunker" }
+mcn-router-sim = { path = "../mcn-router-sim" }
 tokio = { workspace = true }
 blake3 = { workspace = true }
 anyhow = { workspace = true }
