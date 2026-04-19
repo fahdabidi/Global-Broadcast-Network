@@ -395,3 +395,6 @@ write_raw_frame(upstream, ack)          // relay ACK back
 4. `./restart-static-nodes.sh <stack>` redeploy EC2 nodes
 5. `./relay-control-interactive.sh` → `SendDummy` → expect ACK in ring buffer with matching `chunk_id` and `hash`
 6. CloudWatch logs should show Guard/Middle/Exit each logging "forwarding to next_hop" and Publisher logging "chunk received, sending ACK"
+
+
+docker build --no-cache -t gbn-relay -f Dockerfile.relay .

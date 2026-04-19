@@ -51,12 +51,37 @@ cf_output() {
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROTO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+RELAY_DOCKERFILE="$PROTO_ROOT/Dockerfile.relay"
+PUBLISHER_DOCKERFILE="$PROTO_ROOT/Dockerfile.publisher"
+
+require_file() {
+  local path="$1"
+  local label="$2"
+  if [ ! -f "$path" ]; then
+    echo "ERROR: $label not found at: $path"
+    exit 1
+  fi
+}
+
+build_image() {
+  local image_name="$1"
+  local dockerfile_name="$2"
+
+  (
+    cd "$PROTO_ROOT"
+    docker build -t "$image_name" -f "$dockerfile_name" .
+  )
+}
 
 echo "============================================"
 echo "  GBN Phase 1 — Build & Push to ECR"
 echo "  Stack:  $STACK_NAME"
 echo "  Region: $REGION"
+echo "  Root:   $PROTO_ROOT"
 echo "============================================"
+
+require_file "$RELAY_DOCKERFILE" "Relay Dockerfile"
+require_file "$PUBLISHER_DOCKERFILE" "Publisher Dockerfile"
 
 echo "[1/5] Resolving stack outputs..."
 ECR_URI_RELAY="$(cf_output ECRUriRelay)"
@@ -105,13 +130,13 @@ CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}" \
 cargo build --release --bin gbn-proto --features distributed-trace
 
 echo "[4/5] Building Docker images..."
-# Build relay image (no ffmpeg)
-docker build -t gbn-relay -f "$PROTO_ROOT/Dockerfile.relay" "$PROTO_ROOT"
+# Build from the repo root so Dockerfile resolution does not depend on caller cwd.
+build_image gbn-relay Dockerfile.relay
 docker tag gbn-relay "${ECR_URI_RELAY}:${GIT_SHA}"
 docker tag gbn-relay "${ECR_URI_RELAY}:latest"
 
 # Build publisher image (includes ffmpeg)
-docker build -t gbn-publisher -f "$PROTO_ROOT/Dockerfile.publisher" "$PROTO_ROOT"
+build_image gbn-publisher Dockerfile.publisher
 docker tag gbn-publisher "${ECR_URI_PUBLISHER}:${GIT_SHA}"
 docker tag gbn-publisher "${ECR_URI_PUBLISHER}:latest"
 
