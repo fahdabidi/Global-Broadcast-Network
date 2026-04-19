@@ -33,15 +33,62 @@ pub type ChunkBytes = Vec<u8>;
 const SNOW_N_MAX_PLAINTEXT_BYTES: usize = 65_487;
 
 /// Relay descriptor used in local DHT/seed-store views.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationState {
+    PropagatedOnly,
+    Unvalidated,
+    Direct,
+    Complete,
+    Isolated,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RelayNode {
     pub addr: SocketAddr,
     pub identity_pub: [u8; 32],
     pub subnet_tag: String,
-    /// Unix timestamp (ms) when this node was last seen by the local seed store.
-    /// Set on every insert/update; not propagated over gossip.
+    /// Signed announcement timestamp carried by the origin node.
+    #[serde(default)]
+    pub announce_ts_ms: u64,
+    /// Unix timestamp (ms) this node was last directly confirmed.
+    #[serde(default)]
+    pub last_direct_seen_ms: Option<u64>,
+    /// Unix timestamp (ms) this node was last observed through propagation.
+    #[serde(default)]
+    pub last_propagated_seen_ms: Option<u64>,
+    /// Unix timestamp (ms) this node was last observed from any source.
+    #[serde(default)]
+    pub last_observed_ms: u64,
+    #[serde(default = "default_validation_state")]
+    pub validation_state: ValidationState,
+    #[serde(default = "default_validation_score")]
+    pub validation_score: u32,
+    /// Legacy field kept for compatibility with older control/report consumers.
     #[serde(default)]
     pub last_seen_ms: u64,
+}
+
+fn default_validation_state() -> ValidationState {
+    #[cfg(feature = "dht-validation-policy")]
+    {
+        ValidationState::Unvalidated
+    }
+    #[cfg(not(feature = "dht-validation-policy"))]
+    {
+    ValidationState::Direct
+    }
+}
+
+fn default_validation_score() -> u32 {
+    #[cfg(feature = "dht-validation-policy")]
+    {
+        10
+    }
+    #[cfg(not(feature = "dht-validation-policy"))]
+    {
+        100
+    }
 }
 
 pub fn relay_node_from_descriptor(descriptor: &RelayDescriptor) -> RelayNode {
@@ -49,6 +96,12 @@ pub fn relay_node_from_descriptor(descriptor: &RelayDescriptor) -> RelayNode {
         addr: descriptor.address,
         identity_pub: descriptor.identity_key,
         subnet_tag: descriptor.subnet_tag.clone(),
+        announce_ts_ms: descriptor.timestamp,
+        last_direct_seen_ms: None,
+        last_propagated_seen_ms: None,
+        last_observed_ms: 0,
+        validation_state: default_validation_state(),
+        validation_score: default_validation_score(),
         last_seen_ms: 0,
     }
 }
@@ -158,7 +211,11 @@ pub async fn build_circuit(
         };
 
         Ok(OnionCircuit {
-            path: vec![relay_to_hop(guard), relay_to_hop(middle), relay_to_hop(exit)],
+            path: vec![
+                relay_to_hop(guard),
+                relay_to_hop(middle),
+                relay_to_hop(exit),
+            ],
             guard_addr: guard.addr,
             middle_addr: middle.addr,
             exit_addr: exit.addr,
@@ -311,21 +368,24 @@ async fn send_chunk_via_circuit(
         )
     })?;
 
-    let publisher_stage = "publisher";
-    let mut sealed = seal_layer_for_hop(
-        &circuit.publisher_info,
-        None,
-        terminal_payload_bytes,
-        &payload_trace,
-        publisher_stage,
+    // Seal payload once for publisher — no OnionLayer wrapper; payload travels unchanged through relays.
+    anyhow::ensure!(
+        terminal_payload_bytes.len() <= SNOW_N_MAX_PLAINTEXT_BYTES,
+        "Payload too large for Noise_N: publisher plaintext={} bytes (limit {})",
+        terminal_payload_bytes.len(),
+        SNOW_N_MAX_PLAINTEXT_BYTES
+    );
+    let payload_sealed = seal(
+        &circuit.publisher_info.identity_pub,
+        &terminal_payload_bytes,
     )
     .map_err(|e| {
         push_packet_meta_trace(
             "ComponentError",
             payload_len,
             &format!(
-                "circuit.send_chunk ERROR stage={} hop={} chunk_id={} err={e:#}",
-                publisher_stage, circuit.publisher_addr, chunk_id
+                "circuit.send_chunk ERROR stage=publisher hop={} chunk_id={} err={e:#}",
+                circuit.publisher_addr, chunk_id
             ),
             &next_chain(&send_input_chain),
             "circuit.error",
@@ -333,6 +393,8 @@ async fn send_chunk_via_circuit(
         e
     })?;
 
+    // Build routing onion innermost-first: Exit gets inner=vec![], Middle wraps Exit routing, Guard wraps Middle routing.
+    let mut routing: Vec<u8> = Vec::new();
     for idx in (0..circuit.path.len()).rev() {
         let hop = &circuit.path[idx];
         let next_addr = if idx + 1 < circuit.path.len() {
@@ -341,10 +403,10 @@ async fn send_chunk_via_circuit(
             circuit.publisher_addr
         };
         let stage = hop_stage_label(idx, circuit.path.len());
-        sealed = seal_layer_for_hop(
+        routing = seal_layer_for_hop(
             hop,
             Some(next_addr),
-            sealed,
+            routing,
             hop_layer_traces.get(idx).map(String::as_str).unwrap_or(""),
             &stage,
         )
@@ -362,6 +424,13 @@ async fn send_chunk_via_circuit(
             e
         })?;
     }
+
+    // Compound frame: [u32_be routing_len][routing_sealed][payload_sealed]
+    let routing_len_u32 = routing.len() as u32;
+    let mut compound = Vec::with_capacity(4 + routing.len() + payload_sealed.len());
+    compound.extend_from_slice(&routing_len_u32.to_be_bytes());
+    compound.extend_from_slice(&routing);
+    compound.extend_from_slice(&payload_sealed);
 
     let guard_addr = circuit.path[0].addr;
     let mut stream = timeout(Duration::from_secs(10), TcpStream::connect(guard_addr))
@@ -382,9 +451,9 @@ async fn send_chunk_via_circuit(
             e
         })?;
 
-    write_raw_frame(&mut stream, &sealed)
+    write_raw_frame(&mut stream, &compound)
         .await
-        .context("Failed writing outer onion frame to Guard")
+        .context("Failed writing compound onion frame to Guard")
         .map_err(|e| {
             push_packet_meta_trace(
                 "ComponentError",
@@ -432,22 +501,21 @@ async fn send_chunk_via_circuit(
             );
             e
         })?;
-    let ack_layer: OnionLayer =
-        serde_json::from_slice(&ack_open)
-            .context("Failed decoding creator ACK OnionLayer")
-            .map_err(|e| {
-                push_packet_meta_trace(
-                    "ComponentError",
-                    payload_len,
-                    &format!(
-                        "circuit.send_chunk ERROR decode_ack_layer chunk_id={} err={e:#}",
-                        chunk_id
-                    ),
-                    &next_chain(&send_input_chain),
-                    "circuit.error",
-                );
-                e
-            })?;
+    let ack_layer: OnionLayer = serde_json::from_slice(&ack_open)
+        .context("Failed decoding creator ACK OnionLayer")
+        .map_err(|e| {
+            push_packet_meta_trace(
+                "ComponentError",
+                payload_len,
+                &format!(
+                    "circuit.send_chunk ERROR decode_ack_layer chunk_id={} err={e:#}",
+                    chunk_id
+                ),
+                &next_chain(&send_input_chain),
+                "circuit.error",
+            );
+            e
+        })?;
     anyhow::ensure!(
         ack_layer.next_hop.is_none(),
         "Creator ACK layer expected next_hop=None, got {:?}",
@@ -525,6 +593,41 @@ async fn send_chunk_via_circuit(
         "circuit.send",
     );
     Ok(())
+}
+
+pub async fn send_chunk_via_path(
+    creator_priv_key: &[u8; 32],
+    guard: &RelayNode,
+    middle: &RelayNode,
+    exit: &RelayNode,
+    publisher_addr: SocketAddr,
+    publisher_pub_key: [u8; 32],
+    chunk_id: u64,
+    chunk_index: u32,
+    total_chunks: u32,
+    transfer_trace_root: Option<&str>,
+    payload: ChunkBytes,
+) -> Result<()> {
+    let circuit = build_circuit(
+        creator_priv_key,
+        guard,
+        middle,
+        exit,
+        publisher_addr,
+        publisher_pub_key,
+        transfer_trace_root.unwrap_or(""),
+    )
+    .await?;
+
+    send_chunk_via_circuit(
+        &circuit,
+        chunk_id,
+        chunk_index,
+        total_chunks,
+        transfer_trace_root,
+        payload,
+    )
+    .await
 }
 
 /// Manages a pool of pre-selected onion paths.
@@ -673,18 +776,21 @@ pub async fn build_circuits_speculative(
             middle.addr,
             exit.addr
         );
-        let candidate =
-            build_circuit(
-                creator_priv_key,
-                &guard,
-                &middle,
-                &exit,
-                publisher_addr,
-                publisher_pub_key,
-                &candidate_trace,
-            )
-            .await?;
-        let addrs = [candidate.guard_addr, candidate.middle_addr, candidate.exit_addr];
+        let candidate = build_circuit(
+            creator_priv_key,
+            &guard,
+            &middle,
+            &exit,
+            publisher_addr,
+            publisher_pub_key,
+            &candidate_trace,
+        )
+        .await?;
+        let addrs = [
+            candidate.guard_addr,
+            candidate.middle_addr,
+            candidate.exit_addr,
+        ];
         if addrs.iter().any(|addr| used_relay_addrs.contains(addr)) {
             continue;
         }
@@ -720,7 +826,19 @@ pub async fn build_circuits_speculative_from_descriptors(
     max_concurrent: usize,
 ) -> Result<Vec<OnionCircuit>> {
     let all_peers = relay_nodes_from_descriptors(descriptors);
-    let exit_candidates = select_exit_candidates(&all_peers);
+    #[cfg(feature = "dht-validation-policy")]
+    let trusted_peers: Vec<RelayNode> = all_peers
+        .iter()
+        .filter(|p| {
+            matches!(p.validation_state, ValidationState::Direct | ValidationState::Complete)
+                && p.validation_score > 0
+        })
+        .cloned()
+        .collect();
+    #[cfg(not(feature = "dht-validation-policy"))]
+    let trusted_peers = all_peers.clone();
+
+    let exit_candidates = select_exit_candidates(&trusted_peers);
     build_circuits_speculative(
         creator_priv_key,
         &all_peers,
@@ -758,7 +876,19 @@ pub async fn send_scale_multipath(
 ) -> Result<(Vec<ScaleChunkOutcome>, u64)> {
     let started = tokio::time::Instant::now();
 
-    let exit_candidates = select_exit_candidates(&all_peers);
+    #[cfg(feature = "dht-validation-policy")]
+    let trusted_peers: Vec<RelayNode> = all_peers
+        .iter()
+        .filter(|p| {
+            matches!(p.validation_state, ValidationState::Direct | ValidationState::Complete)
+                && p.validation_score > 0
+        })
+        .cloned()
+        .collect();
+    #[cfg(not(feature = "dht-validation-policy"))]
+    let trusted_peers = all_peers.clone();
+
+    let exit_candidates = select_exit_candidates(&trusted_peers);
     if exit_candidates.is_empty() {
         anyhow::bail!("No FreeSubnet exit nodes in DHT — cannot build circuits");
     }
@@ -770,16 +900,16 @@ pub async fn send_scale_multipath(
             "scale.build_circuits INPUT chunk_count={} chunk_size={} peers={} exits={}",
             chunk_count,
             chunk_size,
-            all_peers.len(),
+            trusted_peers.len(),
             exit_candidates.len()
         ),
         parent_chain,
         "scale.build",
     );
 
-    let circuits = build_circuits_speculative(
+    let mut circuits = build_circuits_speculative(
         creator_priv_key,
-        &all_peers,
+        &trusted_peers,
         &exit_candidates,
         publisher_addr,
         publisher_pub_key,
@@ -787,6 +917,76 @@ pub async fn send_scale_multipath(
         chunk_count * 5,
     )
     .await?;
+
+    #[cfg(feature = "dht-validation-policy")]
+    {
+        let unvalidated_middles: Vec<RelayNode> = all_peers
+            .iter()
+            .filter(|p| {
+                p.validation_state == ValidationState::Unvalidated
+                    && p.validation_score > 0
+                    && p.last_direct_seen_ms.is_some()
+                    && p.subnet_tag == "HostileSubnet"
+            })
+            .cloned()
+            .collect();
+        if chunk_count >= 2 && !unvalidated_middles.is_empty() && trusted_peers.len() >= 3 {
+            let guard = trusted_peers
+                .iter()
+                .filter(|p| p.subnet_tag == "HostileSubnet")
+                .max_by_key(|p| (p.validation_state == ValidationState::Complete, p.validation_score))
+                .cloned();
+            let exit = exit_candidates
+                .iter()
+                .max_by_key(|p| (p.validation_state == ValidationState::Complete, p.validation_score))
+                .cloned();
+            let baseline_middle = trusted_peers
+                .iter()
+                .filter(|p| p.subnet_tag == "HostileSubnet")
+                .filter(|p| guard.as_ref().map(|g| g.addr != p.addr).unwrap_or(true))
+                .filter(|p| exit.as_ref().map(|e| e.addr != p.addr).unwrap_or(true))
+                .max_by_key(|p| (p.validation_state == ValidationState::Complete, p.validation_score))
+                .cloned();
+            let canary_middle = unvalidated_middles
+                .iter()
+                .filter(|p| guard.as_ref().map(|g| g.addr != p.addr).unwrap_or(true))
+                .filter(|p| exit.as_ref().map(|e| e.addr != p.addr).unwrap_or(true))
+                .max_by_key(|p| p.validation_score)
+                .cloned();
+
+            if let (Some(guard), Some(exit), Some(baseline_middle), Some(canary_middle)) =
+                (guard, exit, baseline_middle, canary_middle)
+            {
+                let canary_circuit = build_circuit(
+                    creator_priv_key,
+                    &guard,
+                    &canary_middle,
+                    &exit,
+                    publisher_addr,
+                    publisher_pub_key,
+                    parent_chain,
+                )
+                .await?;
+                let baseline_circuit = build_circuit(
+                    creator_priv_key,
+                    &guard,
+                    &baseline_middle,
+                    &exit,
+                    publisher_addr,
+                    publisher_pub_key,
+                    parent_chain,
+                )
+                .await?;
+                if circuits.len() >= 2 {
+                    circuits[0] = canary_circuit;
+                    circuits[1] = baseline_circuit;
+                } else {
+                    circuits.insert(0, canary_circuit);
+                    circuits.push(baseline_circuit);
+                }
+            }
+        }
+    }
 
     let total = circuits.len();
     let total_u32 = total as u32;
@@ -839,7 +1039,15 @@ pub async fn send_scale_multipath(
                 .await;
                 let acked = res.is_ok();
                 let error_msg = res.err().map(|e| format!("{e:#}"));
-                (i as u32, chunk_id, guard_addr, middle_addr, exit_addr, acked, error_msg)
+                (
+                    i as u32,
+                    chunk_id,
+                    guard_addr,
+                    middle_addr,
+                    exit_addr,
+                    acked,
+                    error_msg,
+                )
             })
         })
         .collect();
@@ -920,6 +1128,12 @@ mod tests {
             addr: format!("127.0.0.1:{}", port).parse().unwrap(),
             identity_pub: [0u8; 32],
             subnet_tag: tag.to_string(),
+            announce_ts_ms: 0,
+            last_direct_seen_ms: None,
+            last_propagated_seen_ms: None,
+            last_observed_ms: 0,
+            validation_state: ValidationState::Direct,
+            validation_score: 100,
             last_seen_ms: 0,
         };
         let peers = vec![
@@ -938,6 +1152,12 @@ mod tests {
             addr: format!("127.0.0.1:{}", port).parse().unwrap(),
             identity_pub: [key; 32],
             subnet_tag: tag.to_string(),
+            announce_ts_ms: 0,
+            last_direct_seen_ms: None,
+            last_propagated_seen_ms: None,
+            last_observed_ms: 0,
+            validation_state: ValidationState::Direct,
+            validation_score: 100,
             last_seen_ms: 0,
         };
         let all = vec![

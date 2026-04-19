@@ -17,9 +17,10 @@ use libp2p::{
 };
 use mcn_crypto::x25519_pubkey_from_privkey;
 use rand::Rng;
+use rand::seq::SliceRandom;
 use std::time::Duration;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     net::{IpAddr, SocketAddr},
     sync::{Arc, RwLock},
@@ -46,8 +47,16 @@ pub struct GossipRuntime {
     pub last_rebootstrap: Instant,
     pub rebootstrap_interval: Duration,
     pub last_announce: Instant,
+    pub announce_interval: Duration,
+    pub last_propagate: Instant,
+    pub propagate_interval: Duration,
+    pub propagate_peer_percent: usize,
+    pub propagate_entry_percent: usize,
+    pub propagate_max_entries: usize,
     pub seed_store: Arc<RwLock<HashMap<SocketAddr, RelayNode>>>,
     pub peer_ip_map: HashMap<IpAddr, PeerId>,
+    pub peer_ip_reverse: HashMap<PeerId, IpAddr>,
+    pub pending_direct_validation: HashSet<IpAddr>,
 }
 
 pub enum SwarmControlCmd {
@@ -95,6 +104,18 @@ impl GossipRuntime {
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(30),
         );
+        let announce_interval = Duration::from_secs(
+            env::var("GBN_NODE_ANNOUNCE_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(10),
+        );
+        let propagate_interval = Duration::from_secs(
+            env::var("GBN_NODE_PROPAGATE_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(10),
+        );
         Self {
             engine: PlumTreeEngine::new(gossip_bps, max_tracked_messages),
             metrics,
@@ -113,8 +134,27 @@ impl GossipRuntime {
                     .unwrap_or(60),
             ),
             last_announce: Instant::now(),
+            announce_interval,
+            last_propagate: Instant::now(),
+            propagate_interval,
+            propagate_peer_percent: env::var("GBN_PROPAGATE_PEER_PERCENT")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .map(|v| v.clamp(1, 100))
+                .unwrap_or(40),
+            propagate_entry_percent: env::var("GBN_PROPAGATE_ENTRY_PERCENT")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .map(|v| v.clamp(1, 100))
+                .unwrap_or(40),
+            propagate_max_entries: env::var("GBN_PROPAGATE_MAX_ENTRIES")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(200),
             seed_store,
             peer_ip_map: HashMap::new(),
+            peer_ip_reverse: HashMap::new(),
+            pending_direct_validation: HashSet::new(),
         }
     }
 }
@@ -292,6 +332,12 @@ fn send_outbound(
             GossipRequest::IWant { message_ids } => ("IWant", message_ids.len() * 32),
             GossipRequest::Prune => ("Prune", 0),
             GossipRequest::Graft => ("Graft", 0),
+            GossipRequest::DirectNodeAnnounce { .. } => ("DirectNodeAnnounce", 0),
+            GossipRequest::DirectNodePropagate { nodes, .. } => {
+                ("DirectNodePropagate", nodes.len() * 64)
+            }
+            GossipRequest::DirectNodeProbe => ("DirectNodeProbe", 0),
+            GossipRequest::DirectNodeProbeResponse { .. } => ("DirectNodeProbeResponse", 0),
         };
         #[cfg(feature = "distributed-trace")]
         let id_chain = match &msg.request {
@@ -330,7 +376,8 @@ fn apply_seed_update_from_gossip_msg(
             let mut accepted = 0usize;
             let mut continuity_events = 0usize;
             for node in &nodes {
-                let (was_accepted, events) = upsert_seed_store_node(&mut store, node.clone(), now_ms);
+                let (was_accepted, events) =
+                    upsert_seed_store_node(&mut store, node.clone(), now_ms, SeedUpdateSource::Propagated);
                 if was_accepted {
                     accepted += 1;
                 }
@@ -357,7 +404,8 @@ fn apply_seed_update_from_gossip_msg(
                 .unwrap_or_default()
                 .as_millis() as u64;
             let mut store = runtime.seed_store.write().unwrap();
-            let (was_accepted, events) = upsert_seed_store_node(&mut store, node.clone(), now_ms);
+            let (was_accepted, events) =
+                upsert_seed_store_node(&mut store, node.clone(), now_ms, SeedUpdateSource::Propagated);
             for event in events {
                 tracing::warn!("Seed-store continuity: {}", event);
             }
@@ -382,13 +430,140 @@ pub fn handle_gossip_event(
     event: request_response::Event<GossipRequest, GossipResponse>,
 ) {
     if let request_response::Event::Message { peer, message } = event {
+        #[cfg(feature = "dht-validation-policy")]
+        let source_validation_state = runtime
+            .peer_ip_reverse
+            .get(&peer)
+            .and_then(|ip| {
+                runtime
+                    .seed_store
+                    .read()
+                    .unwrap()
+                    .values()
+                    .find(|node| node.addr.ip() == *ip)
+                    .map(|node| node.validation_state.clone())
+            });
         match message {
             request_response::Message::Request {
                 request, channel, ..
             } => {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                #[cfg(feature = "dht-validation-policy")]
+                match &request {
+                    GossipRequest::DirectNodeAnnounce { node } => {
+                        let mut store = runtime.seed_store.write().unwrap();
+                        let (accepted, events) = upsert_seed_store_node(
+                            &mut store,
+                            node.clone(),
+                            now_ms,
+                            SeedUpdateSource::Direct,
+                        );
+                        for event in events {
+                            tracing::warn!("Seed-store continuity: {}", event);
+                        }
+                        crate::control::push_packet_meta_trace(
+                            "InternalAction",
+                            if accepted { 32 } else { 0 },
+                            &format!(
+                                "DHT updated: DirectNodeAnnounce {} accepted={}",
+                                node.addr, accepted
+                            ),
+                            "",
+                            "internal",
+                        );
+                    }
+                    GossipRequest::DirectNodePropagate {
+                        snapshot_ts_ms: _,
+                        nodes,
+                    } => {
+                        if source_validation_state
+                            != Some(crate::circuit_manager::ValidationState::Complete)
+                        {
+                            crate::control::push_packet_meta_trace(
+                                "InternalAction",
+                                0,
+                                "DHT ignored: DirectNodePropagate from non-complete source",
+                                "",
+                                "internal",
+                            );
+                            let _ = swarm
+                                .behaviour_mut()
+                                .gossip
+                                .send_response(channel, GossipResponse::Ack);
+                            return;
+                        }
+                        let mut store = runtime.seed_store.write().unwrap();
+                        let mut accepted = 0usize;
+                        for node in nodes {
+                            let (ok, events) = upsert_seed_store_node(
+                                &mut store,
+                                node.clone(),
+                                now_ms,
+                                SeedUpdateSource::Propagated,
+                            );
+                            if ok {
+                                accepted += 1;
+                                runtime.pending_direct_validation.insert(node.addr.ip());
+                            }
+                            for event in events {
+                                tracing::warn!("Seed-store continuity: {}", event);
+                            }
+                        }
+                        crate::control::push_packet_meta_trace(
+                            "InternalAction",
+                            accepted * 32,
+                            &format!("DHT updated: DirectNodePropagate accepted={accepted}"),
+                            "",
+                            "internal",
+                        );
+                    }
+                    GossipRequest::DirectNodeProbe => {
+                        if let Some(local_node) = get_local_relay_node() {
+                            swarm.behaviour_mut().gossip.send_request(
+                                &peer,
+                                GossipRequest::DirectNodeProbeResponse { node: local_node },
+                            );
+                        }
+                    }
+                    GossipRequest::DirectNodeProbeResponse { node } => {
+                        let mut store = runtime.seed_store.write().unwrap();
+                        let (accepted, events) = upsert_seed_store_node(
+                            &mut store,
+                            node.clone(),
+                            now_ms,
+                            SeedUpdateSource::Direct,
+                        );
+                        runtime.pending_direct_validation.remove(&node.addr.ip());
+                        for event in events {
+                            tracing::warn!("Seed-store continuity: {}", event);
+                        }
+                        crate::control::push_packet_meta_trace(
+                            "InternalAction",
+                            if accepted { 32 } else { 0 },
+                            &format!(
+                                "DHT updated: DirectNodeProbeResponse {} accepted={}",
+                                node.addr, accepted
+                            ),
+                            "",
+                            "internal",
+                        );
+                    }
+                    _ => {}
+                }
+                #[cfg(not(feature = "dht-validation-policy"))]
+                let _ = now_ms;
+
                 // Peek at GossipData before engine takes ownership
                 let mut id_chain = String::new();
-                if let GossipRequest::GossipData { payload, message_id, .. } = &request {
+                if let GossipRequest::GossipData {
+                    payload,
+                    message_id,
+                    ..
+                } = &request
+                {
                     #[cfg(feature = "distributed-trace")]
                     if let GossipRequest::GossipData { trace, .. } = &request {
                         id_chain = crate::trace::chain_to_string(&trace.chain);
@@ -422,6 +597,12 @@ fn short_key_fingerprint(key: &[u8; 32]) -> String {
     hex_key.chars().take(12).collect()
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum SeedUpdateSource {
+    Direct,
+    Propagated,
+}
+
 // Keep the seed-store coherent across relay restarts and IP churn:
 // - one identity key should map to one latest address,
 // - one address should map to the latest announced key.
@@ -430,9 +611,38 @@ fn upsert_seed_store_node(
     store: &mut HashMap<SocketAddr, RelayNode>,
     mut incoming: RelayNode,
     now_ms: u64,
+    source: SeedUpdateSource,
 ) -> (bool, Vec<String>) {
     let mut events = Vec::new();
-    incoming.last_seen_ms = now_ms;
+    #[cfg(feature = "dht-validation-policy")]
+    {
+        let existing_score = store
+            .get(&incoming.addr)
+            .map(|node| node.validation_score)
+            .unwrap_or(0);
+        incoming.last_observed_ms = now_ms;
+        incoming.last_seen_ms = now_ms;
+        if incoming.announce_ts_ms == 0 {
+            incoming.announce_ts_ms = now_ms;
+        }
+        match source {
+            SeedUpdateSource::Direct => {
+                incoming.last_direct_seen_ms = Some(now_ms);
+                incoming.validation_score = existing_score.max(10);
+                incoming.validation_state = crate::circuit_manager::ValidationState::Unvalidated;
+            }
+            SeedUpdateSource::Propagated => {
+                incoming.last_propagated_seen_ms = Some(now_ms);
+                incoming.validation_score = existing_score;
+                incoming.validation_state = crate::circuit_manager::ValidationState::PropagatedOnly;
+            }
+        }
+    }
+    #[cfg(not(feature = "dht-validation-policy"))]
+    {
+        let _ = source;
+        incoming.last_seen_ms = now_ms;
+    }
 
     if incoming.identity_pub.iter().all(|b| *b == 0) {
         events.push(format!(
@@ -443,6 +653,14 @@ fn upsert_seed_store_node(
     }
 
     if let Some(existing) = store.get(&incoming.addr) {
+        #[cfg(feature = "dht-validation-policy")]
+        if existing.announce_ts_ms > incoming.announce_ts_ms {
+            events.push(format!(
+                "reject_stale_announce addr={} incoming_ts={} existing_ts={}",
+                incoming.addr, incoming.announce_ts_ms, existing.announce_ts_ms
+            ));
+            return (false, events);
+        }
         if existing.identity_pub != incoming.identity_pub {
             events.push(format!(
                 "addr_rekey addr={} old_fp={} new_fp={}",
@@ -470,6 +688,35 @@ fn upsert_seed_store_node(
         ));
     }
 
+    #[cfg(feature = "dht-validation-policy")]
+    if let Some(existing) = store.get(&incoming.addr) {
+        let merged_direct = existing.last_direct_seen_ms.max(incoming.last_direct_seen_ms);
+        let merged_prop = existing
+            .last_propagated_seen_ms
+            .max(incoming.last_propagated_seen_ms);
+        incoming.last_direct_seen_ms = merged_direct;
+        incoming.last_propagated_seen_ms = merged_prop;
+        incoming.last_observed_ms = existing.last_observed_ms.max(incoming.last_observed_ms);
+        incoming.last_seen_ms = incoming.last_observed_ms;
+        incoming.validation_score = existing.validation_score.max(incoming.validation_score);
+        incoming.validation_state = if existing.validation_state
+            == crate::circuit_manager::ValidationState::Isolated
+        {
+            crate::circuit_manager::ValidationState::Isolated
+        } else if existing.validation_state == crate::circuit_manager::ValidationState::Complete {
+            crate::circuit_manager::ValidationState::Complete
+        } else if existing.validation_state == crate::circuit_manager::ValidationState::Direct {
+            crate::circuit_manager::ValidationState::Direct
+        } else if incoming.last_direct_seen_ms.is_some() {
+            crate::circuit_manager::ValidationState::Unvalidated
+        } else {
+            match source {
+                SeedUpdateSource::Propagated => crate::circuit_manager::ValidationState::PropagatedOnly,
+                SeedUpdateSource::Direct => crate::circuit_manager::ValidationState::Unvalidated,
+            }
+        };
+    }
+
     store.insert(incoming.addr, incoming);
     (true, events)
 }
@@ -491,7 +738,9 @@ pub async fn drive_swarm_once(
 
     if let Some(event) = swarm_event {
         match event {
-            SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+            SwarmEvent::ConnectionEstablished {
+                peer_id, endpoint, ..
+            } => {
                 runtime.engine.add_lazy_peer(peer_id);
                 let remote_addr = match &endpoint {
                     ConnectedPoint::Dialer { address, .. } => address,
@@ -499,6 +748,25 @@ pub async fn drive_swarm_once(
                 };
                 if let Some(ip) = ip_from_multiaddr(remote_addr) {
                     runtime.peer_ip_map.insert(ip, peer_id);
+                    #[cfg(feature = "dht-validation-policy")]
+                    runtime.peer_ip_reverse.insert(peer_id, ip);
+                }
+                #[cfg(feature = "dht-validation-policy")]
+                if let Some(local_node) = get_local_relay_node() {
+                    swarm.behaviour_mut().gossip.send_request(
+                        &peer_id,
+                        GossipRequest::DirectNodeAnnounce {
+                            node: local_node.clone(),
+                        },
+                    );
+                    if let Some(ip) = runtime.peer_ip_reverse.get(&peer_id).copied() {
+                        if runtime.pending_direct_validation.contains(&ip) {
+                            swarm
+                                .behaviour_mut()
+                                .gossip
+                                .send_request(&peer_id, GossipRequest::DirectNodeProbe);
+                        }
+                    }
                 }
             }
             SwarmEvent::Behaviour(RouterBehaviourEvent::Gossip(event)) => {
@@ -553,19 +821,92 @@ pub async fn drive_swarm_once(
     // Publish local node presence to the Gossip mesh for service roles that
     // should appear in runtime discovery (relay/creator/publisher).
     if role_participates_in_node_announce(&runtime.role) {
-        if runtime.last_announce.elapsed() >= Duration::from_secs(10) {
+        #[cfg(feature = "dht-validation-policy")]
+        let announce_due = runtime.last_announce.elapsed() >= runtime.announce_interval;
+        #[cfg(not(feature = "dht-validation-policy"))]
+        let announce_due = runtime.last_announce.elapsed() >= Duration::from_secs(10);
+        if announce_due {
             runtime.last_announce = Instant::now();
             if let Some(local_node) = get_local_relay_node() {
                 let msg = GbnGossipMsg::NodeAnnounce(local_node);
                 if let Ok(payload) = serde_json::to_vec(&msg) {
                     let mut msg_id = [0u8; 32];
-                    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64;
                     msg_id[0..8].copy_from_slice(&ts.to_le_bytes());
                     // 0x414E_4E4F is "ANNO"
-                    msg_id[16..24].copy_from_slice(&0x414E_4E4F_u64.to_le_bytes()); 
+                    msg_id[16..24].copy_from_slice(&0x414E_4E4F_u64.to_le_bytes());
                     let outbound = runtime.engine.publish_local(msg_id, payload);
                     send_outbound(swarm, outbound);
                 }
+            }
+        }
+    }
+
+    #[cfg(feature = "dht-validation-policy")]
+    if runtime.last_propagate.elapsed() >= runtime.propagate_interval {
+        runtime.last_propagate = Instant::now();
+        let peers: Vec<PeerId> = runtime
+            .engine
+            .state
+            .eager_peers
+            .iter()
+            .copied()
+            .chain(runtime.engine.state.lazy_peers.iter().copied())
+            .collect();
+        if !peers.is_empty() {
+            let mut sorted_nodes: Vec<RelayNode> =
+                runtime.seed_store.read().unwrap().values().cloned().collect();
+            sorted_nodes.sort_unstable_by(|a, b| b.last_observed_ms.cmp(&a.last_observed_ms));
+
+            let mut entry_count = (sorted_nodes.len() * runtime.propagate_entry_percent) / 100;
+            entry_count = entry_count.clamp(1, runtime.propagate_max_entries);
+            sorted_nodes.truncate(entry_count);
+
+            if !sorted_nodes.is_empty() {
+                let mut peer_targets = peers;
+                peer_targets.shuffle(&mut rand::thread_rng());
+                let mut peer_count =
+                    (peer_targets.len() * runtime.propagate_peer_percent) / 100;
+                peer_count = peer_count.clamp(1, peer_targets.len());
+                peer_targets.truncate(peer_count);
+                let snapshot_ts_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                for peer in peer_targets {
+                    swarm.behaviour_mut().gossip.send_request(
+                        &peer,
+                        GossipRequest::DirectNodePropagate {
+                            snapshot_ts_ms,
+                            nodes: sorted_nodes.clone(),
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "dht-validation-policy")]
+    if !runtime.pending_direct_validation.is_empty() {
+        let probe_ips: Vec<IpAddr> = runtime.pending_direct_validation.iter().copied().collect();
+        for ip in probe_ips {
+            if let Some(peer) = runtime.peer_ip_map.get(&ip).copied() {
+                swarm
+                    .behaviour_mut()
+                    .gossip
+                    .send_request(&peer, GossipRequest::DirectNodeProbe);
+            } else {
+                let p2p_port = env::var("GBN_P2P_PORT")
+                    .ok()
+                    .and_then(|p| p.parse::<u16>().ok())
+                    .unwrap_or(4001);
+                let mut addr = libp2p::Multiaddr::empty();
+                addr.push(Protocol::from(ip));
+                addr.push(Protocol::Tcp(p2p_port));
+                let _ = swarm.dial(addr);
             }
         }
     }
@@ -648,7 +989,7 @@ pub async fn bootstrap_from_static_seeds(swarm: &mut Swarm<RouterBehaviour>) -> 
         if ip_str.is_empty() {
             continue;
         }
-        
+
         let ip_addr: IpAddr = match ip_str.parse() {
             Ok(a) => a,
             // fallback, if it includes port
@@ -720,7 +1061,10 @@ async fn bootstrap_from_docker_dns(swarm: &mut Swarm<RouterBehaviour>) -> Result
 /// GBN_ONION_PORT, GBN_SUBNET_TAG, and deriving the Noise pubkey.
 pub fn get_local_relay_node() -> Option<RelayNode> {
     let ipv4 = env::var("GBN_INSTANCE_IPV4").ok()?;
-    let onion_port: u16 = env::var("GBN_ONION_PORT").unwrap_or_else(|_| "9001".to_string()).parse().ok()?;
+    let onion_port: u16 = env::var("GBN_ONION_PORT")
+        .unwrap_or_else(|_| "9001".to_string())
+        .parse()
+        .ok()?;
     let ip_addr: IpAddr = ipv4.parse().ok()?;
 
     let noise_pub_hex = if let Ok(pub_hex) = env::var("GBN_NOISE_PUBKEY_HEX") {
@@ -751,6 +1095,15 @@ pub fn get_local_relay_node() -> Option<RelayNode> {
         addr: SocketAddr::new(ip_addr, onion_port),
         identity_pub,
         subnet_tag,
+        announce_ts_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
+        last_direct_seen_ms: None,
+        last_propagated_seen_ms: None,
+        last_observed_ms: 0,
+        validation_state: crate::circuit_manager::ValidationState::Direct,
+        validation_score: 100,
         last_seen_ms: 0,
     })
 }
@@ -759,9 +1112,10 @@ pub fn get_local_relay_node() -> Option<RelayNode> {
 /// Fetches `GBN_PUBLISHER_IP` and `GBN_PUBLISHER_PUBKEY_HEX` injected into environment.
 pub async fn discover_publisher_static() -> Result<(SocketAddr, [u8; 32])> {
     let fallback_port = env::var("GBN_MPUB_PORT").unwrap_or_else(|_| "7001".to_string());
-    
+
     let ip_str = env::var("GBN_PUBLISHER_IP").context("GBN_PUBLISHER_IP not set")?;
-    let pub_key_hex = env::var("GBN_PUBLISHER_PUBKEY_HEX").context("GBN_PUBLISHER_PUBKEY_HEX not set")?;
+    let pub_key_hex =
+        env::var("GBN_PUBLISHER_PUBKEY_HEX").context("GBN_PUBLISHER_PUBKEY_HEX not set")?;
 
     let addr = if let Ok(socket_addr) = ip_str.parse::<SocketAddr>() {
         socket_addr

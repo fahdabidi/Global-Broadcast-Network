@@ -17,7 +17,11 @@ where
         .decode(encoded.as_bytes())
         .map_err(D::Error::custom)?;
     decoded.try_into().map_err(|decoded: Vec<u8>| {
-        D::Error::custom(format!("expected {} decoded bytes, got {}", N, decoded.len()))
+        D::Error::custom(format!(
+            "expected {} decoded bytes, got {}",
+            N,
+            decoded.len()
+        ))
     })
 }
 

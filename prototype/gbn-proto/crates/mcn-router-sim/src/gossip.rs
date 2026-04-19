@@ -44,6 +44,17 @@ pub enum GossipRequest {
     },
     Prune,
     Graft,
+    DirectNodeAnnounce {
+        node: RelayNode,
+    },
+    DirectNodePropagate {
+        snapshot_ts_ms: u64,
+        nodes: Vec<RelayNode>,
+    },
+    DirectNodeProbe,
+    DirectNodeProbeResponse {
+        node: RelayNode,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -289,28 +300,28 @@ impl PlumTreeEngine {
             GossipRequest::IWant { message_ids } => {
                 let mut out = Vec::new();
                 for id in message_ids {
-                if let Some(payload) = self.payloads.get(&id).cloned() {
-                    if self.state.try_account_send(payload.len() + 32) {
-                        #[cfg(feature = "distributed-trace")]
-                        let trace_chain = self
-                            .trace_chains
-                            .get(&id)
-                            .cloned()
-                            .unwrap_or_else(|| vec![trace::next_hop_id()]);
-                        out.push(OutboundGossip {
-                            peer: from,
+                    if let Some(payload) = self.payloads.get(&id).cloned() {
+                        if self.state.try_account_send(payload.len() + 32) {
                             #[cfg(feature = "distributed-trace")]
-                            request: GossipRequest::GossipData {
-                                message_id: id,
-                                payload,
-                                trace: TraceEnvelope { chain: trace_chain },
-                            },
-                            #[cfg(not(feature = "distributed-trace"))]
-                            request: GossipRequest::GossipData {
-                                message_id: id,
-                                payload,
-                            },
-                        });
+                            let trace_chain = self
+                                .trace_chains
+                                .get(&id)
+                                .cloned()
+                                .unwrap_or_else(|| vec![trace::next_hop_id()]);
+                            out.push(OutboundGossip {
+                                peer: from,
+                                #[cfg(feature = "distributed-trace")]
+                                request: GossipRequest::GossipData {
+                                    message_id: id,
+                                    payload,
+                                    trace: TraceEnvelope { chain: trace_chain },
+                                },
+                                #[cfg(not(feature = "distributed-trace"))]
+                                request: GossipRequest::GossipData {
+                                    message_id: id,
+                                    payload,
+                                },
+                            });
                         }
                     }
                 }
@@ -324,6 +335,10 @@ impl PlumTreeEngine {
                 self.add_eager_peer(from);
                 Vec::new()
             }
+            GossipRequest::DirectNodeAnnounce { .. }
+            | GossipRequest::DirectNodePropagate { .. }
+            | GossipRequest::DirectNodeProbe
+            | GossipRequest::DirectNodeProbeResponse { .. } => Vec::new(),
         }
     }
 

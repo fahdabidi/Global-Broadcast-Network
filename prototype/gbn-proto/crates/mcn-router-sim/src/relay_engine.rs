@@ -112,10 +112,12 @@ pub async fn spawn_onion_relay(
 
 async fn handle_onion_connection(mut upstream: TcpStream, local_priv_key: [u8; 32]) -> Result<()> {
     let root_chain = next_chain("");
-    let encrypted_layer = timeout(Duration::from_secs(30), read_raw_frame(&mut upstream))
+
+    // Read compound frame: [u32_be routing_len][routing_sealed][payload_sealed]
+    let compound_frame = timeout(Duration::from_secs(30), read_raw_frame(&mut upstream))
         .await
-        .context("Timeout reading upstream raw frame")?
-        .context("Failed reading upstream raw frame")
+        .context("Timeout reading upstream compound frame")?
+        .context("Failed reading upstream compound frame")
         .map_err(|e| {
             push_packet_meta_trace(
                 "ComponentError",
@@ -127,42 +129,65 @@ async fn handle_onion_connection(mut upstream: TcpStream, local_priv_key: [u8; 3
             e
         })?;
 
-    let layer_plain = open(&local_priv_key, &encrypted_layer)
-        .context("Failed to open onion layer with local key")
+    if compound_frame.len() < 4 {
+        let msg = format!(
+            "relay.read_upstream ERROR node={} err=compound frame too short: {} bytes",
+            crate::trace::node_id(),
+            compound_frame.len()
+        );
+        push_packet_meta_trace("ComponentError", 0, &msg, &root_chain, "relay.error");
+        anyhow::bail!(msg);
+    }
+    let routing_len = u32::from_be_bytes(compound_frame[..4].try_into().unwrap()) as usize;
+    if compound_frame.len() < 4 + routing_len {
+        let msg = format!(
+            "relay.read_upstream ERROR node={} err=routing_len={} exceeds frame size={}",
+            crate::trace::node_id(),
+            routing_len,
+            compound_frame.len()
+        );
+        push_packet_meta_trace("ComponentError", 0, &msg, &root_chain, "relay.error");
+        anyhow::bail!(msg);
+    }
+    let routing_bytes = &compound_frame[4..4 + routing_len];
+    let payload_bytes = compound_frame[4 + routing_len..].to_vec();
+
+    let layer_plain = open(&local_priv_key, routing_bytes)
+        .context("Failed to open routing layer with local key")
         .map_err(|e| {
             push_packet_meta_trace(
                 "ComponentError",
-                encrypted_layer.len(),
+                routing_bytes.len(),
                 &format!("relay.open_layer ERROR err={e:#}"),
                 &root_chain,
                 "relay.error",
             );
             e
         })?;
-    let layer: OnionLayer =
-        serde_json::from_slice(&layer_plain)
-            .context("Failed to decode OnionLayer")
-            .map_err(|e| {
-                push_packet_meta_trace(
-                    "ComponentError",
-                    layer_plain.len(),
-                    &format!("relay.decode_layer ERROR err={e:#}"),
-                    &root_chain,
-                    "relay.error",
-                );
-                e
-            })?;
+    let layer: OnionLayer = serde_json::from_slice(&layer_plain)
+        .context("Failed to decode routing OnionLayer")
+        .map_err(|e| {
+            push_packet_meta_trace(
+                "ComponentError",
+                layer_plain.len(),
+                &format!("relay.decode_layer ERROR err={e:#}"),
+                &root_chain,
+                "relay.error",
+            );
+            e
+        })?;
 
     let incoming_chain = layer.trace_id.clone().unwrap_or_else(|| root_chain.clone());
     let ingress_chain = next_chain(&incoming_chain);
     push_packet_meta_trace(
         "ComponentInput",
-        layer.inner.len(),
+        payload_bytes.len(),
         &format!(
-            "relay.layer INPUT node={} next_hop={:?} bytes={}",
+            "relay.layer INPUT node={} next_hop={:?} routing_bytes={} payload_bytes={}",
             crate::trace::node_id(),
             layer.next_hop,
-            layer.inner.len()
+            routing_bytes.len(),
+            payload_bytes.len()
         ),
         &ingress_chain,
         "relay.input",
@@ -173,12 +198,13 @@ async fn handle_onion_connection(mut upstream: TcpStream, local_priv_key: [u8; 3
             let relay_forward_chain = next_chain(&ingress_chain);
             push_packet_meta_trace(
                 "RelayData(Intermediate)",
-                layer.inner.len(),
+                payload_bytes.len(),
                 &format!(
-                    "relay.forward node={} next_hop={} bytes={}",
+                    "relay.forward node={} next_hop={} payload_bytes={} exit={}",
                     crate::trace::node_id(),
                     next_hop,
-                    layer.inner.len()
+                    payload_bytes.len(),
+                    layer.inner.is_empty()
                 ),
                 &relay_forward_chain,
                 "relay.data",
@@ -191,7 +217,7 @@ async fn handle_onion_connection(mut upstream: TcpStream, local_priv_key: [u8; 3
                 .map_err(|e| {
                     push_packet_meta_trace(
                         "ComponentError",
-                        layer.inner.len(),
+                        payload_bytes.len(),
                         &format!(
                             "relay.connect_next ERROR node={} next_hop={} err={e:#}",
                             crate::trace::node_id(),
@@ -203,42 +229,70 @@ async fn handle_onion_connection(mut upstream: TcpStream, local_priv_key: [u8; 3
                     e
                 })?;
 
-            write_raw_frame(&mut next_stream, &layer.inner)
-                .await
-                .context("Failed writing inner onion bytes to next hop")
-                .map_err(|e| {
-                    push_packet_meta_trace(
-                        "ComponentError",
-                        layer.inner.len(),
-                        &format!(
-                            "relay.write_next ERROR node={} next_hop={} err={e:#}",
-                            crate::trace::node_id(),
-                            next_hop
-                        ),
-                        &relay_forward_chain,
-                        "relay.error",
-                    );
-                    e
-                })?;
+            if layer.inner.is_empty() {
+                // Exit node: inner routing is empty — forward just payload_sealed to publisher.
+                write_raw_frame(&mut next_stream, &payload_bytes)
+                    .await
+                    .context("Failed writing payload bytes to publisher")
+                    .map_err(|e| {
+                        push_packet_meta_trace(
+                            "ComponentError",
+                            payload_bytes.len(),
+                            &format!(
+                                "relay.write_next ERROR node={} next_hop={} err={e:#}",
+                                crate::trace::node_id(),
+                                next_hop
+                            ),
+                            &relay_forward_chain,
+                            "relay.error",
+                        );
+                        e
+                    })?;
+            } else {
+                // Intermediate node (Guard/Middle): forward [u32_be inner_routing_len][inner_routing][payload].
+                let inner_routing_len = layer.inner.len() as u32;
+                let mut forward = Vec::with_capacity(4 + layer.inner.len() + payload_bytes.len());
+                forward.extend_from_slice(&inner_routing_len.to_be_bytes());
+                forward.extend_from_slice(&layer.inner);
+                forward.extend_from_slice(&payload_bytes);
+                write_raw_frame(&mut next_stream, &forward)
+                    .await
+                    .context("Failed writing compound frame to next hop")
+                    .map_err(|e| {
+                        push_packet_meta_trace(
+                            "ComponentError",
+                            forward.len(),
+                            &format!(
+                                "relay.write_next ERROR node={} next_hop={} err={e:#}",
+                                crate::trace::node_id(),
+                                next_hop
+                            ),
+                            &relay_forward_chain,
+                            "relay.error",
+                        );
+                        e
+                    })?;
+            }
 
-            let ack_from_downstream = timeout(Duration::from_secs(30), read_raw_frame(&mut next_stream))
-                .await
-                .context("Timeout waiting for downstream ACK frame")?
-                .context("Failed reading downstream ACK frame")
-                .map_err(|e| {
-                    push_packet_meta_trace(
-                        "ComponentError",
-                        layer.inner.len(),
-                        &format!(
-                            "relay.read_ack_downstream ERROR node={} next_hop={} err={e:#}",
-                            crate::trace::node_id(),
-                            next_hop
-                        ),
-                        &relay_forward_chain,
-                        "relay.error",
-                    );
-                    e
-                })?;
+            let ack_from_downstream =
+                timeout(Duration::from_secs(30), read_raw_frame(&mut next_stream))
+                    .await
+                    .context("Timeout waiting for downstream ACK frame")?
+                    .context("Failed reading downstream ACK frame")
+                    .map_err(|e| {
+                        push_packet_meta_trace(
+                            "ComponentError",
+                            payload_bytes.len(),
+                            &format!(
+                                "relay.read_ack_downstream ERROR node={} next_hop={} err={e:#}",
+                                crate::trace::node_id(),
+                                next_hop
+                            ),
+                            &relay_forward_chain,
+                            "relay.error",
+                        );
+                        e
+                    })?;
 
             // Peel one ACK layer (reverse onion) before relaying upstream.
             let (ack_to_upstream, ack_chain) =
@@ -294,11 +348,11 @@ async fn handle_onion_connection(mut upstream: TcpStream, local_priv_key: [u8; 3
             let msg = format!(
                 "relay.unexpected_terminal ERROR node={} bytes={} err=relay received next_hop=None; publisher must terminate the onion path",
                 crate::trace::node_id(),
-                layer.inner.len()
+                payload_bytes.len()
             );
             push_packet_meta_trace(
                 "ComponentError",
-                layer.inner.len(),
+                payload_bytes.len(),
                 &msg,
                 &terminal_chain,
                 "relay.error",

@@ -17,7 +17,13 @@
 // Remove this once the toolchain is upgraded beyond the affected version.
 #![allow(dead_code)]
 
-use std::{collections::HashMap, net::SocketAddr, path::Path, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    net::SocketAddr,
+    path::Path,
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{Context, Result as AnyResult};
 use gbn_protocol::{
@@ -154,6 +160,9 @@ pub struct Receiver {
 struct ServerSharedState {
     // Maps SessionId -> (total_chunks_expected, Map<chunk_index, Packet>)
     sessions: Arc<Mutex<HashMap<SessionId, (u32, HashMap<u32, EncryptedChunkPacket>)>>>,
+    // Tracks seen payload fragments for idempotent ACK behavior:
+    // (chunk_id, chunk_index) already accepted/observed at publisher.
+    seen_chunks: Arc<Mutex<HashSet<(u64, u32)>>>,
     // Channel to notify when a session is complete
     completed_tx: mpsc::Sender<CompletedSession>,
     // Maps SessionId -> UploadSessionInit (from sentinel frames)
@@ -181,10 +190,7 @@ impl Receiver {
         }
     }
 
-    pub fn new_onion_terminal(
-        listen_addrs: Vec<SocketAddr>,
-        local_priv_key: [u8; 32],
-    ) -> Self {
+    pub fn new_onion_terminal(listen_addrs: Vec<SocketAddr>, local_priv_key: [u8; 32]) -> Self {
         Self {
             listen_addrs,
             mode: ReceiverMode::OnionTerminal { local_priv_key },
@@ -196,6 +202,7 @@ impl Receiver {
         let session_inits: SessionInitStore = Arc::new(Mutex::new(HashMap::new()));
         let shared_state = ServerSharedState {
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            seen_chunks: Arc::new(Mutex::new(HashSet::new())),
             completed_tx,
             session_inits: Arc::clone(&session_inits),
             mode: self.mode,
@@ -263,8 +270,14 @@ async fn handle_connection(mut stream: TcpStream, state: ServerSharedState) {
                 &recv_chain,
                 "publisher.input",
             );
-            if let Err(e) =
-                handle_onion_terminal_frame(&mut stream, &frame, &state, local_priv_key, &recv_chain).await
+            if let Err(e) = handle_onion_terminal_frame(
+                &mut stream,
+                &frame,
+                &state,
+                local_priv_key,
+                &recv_chain,
+            )
+            .await
             {
                 tracing::warn!("Publisher: failed to process onion terminal frame: {e:#}");
             }
@@ -389,62 +402,50 @@ async fn handle_onion_terminal_frame(
     local_priv_key: [u8; 32],
     root_chain: &str,
 ) -> Result<(), ReceiverError> {
-    let opened = open(&local_priv_key, frame).context("Publisher failed opening onion frame").map_err(|e| {
-        push_packet_meta_trace(
-            "ComponentError",
-            frame.len(),
-            &format!("publisher.open_layer ERROR err={e:#}"),
-            root_chain,
-            "publisher.error",
-        );
-        e
-    })?;
-    let layer: OnionLayer =
-        serde_json::from_slice(&opened)
-            .context("Publisher failed decoding terminal OnionLayer")
-            .map_err(|e| {
-                push_packet_meta_trace(
-                    "ComponentError",
-                    opened.len(),
-                    &format!("publisher.decode_layer ERROR err={e:#}"),
-                    root_chain,
-                    "publisher.error",
-                );
-                e
-            })?;
-    let incoming_chain = layer.trace_id.clone().unwrap_or_else(|| root_chain.to_string());
+    // Payload is sealed directly for publisher — no OnionLayer wrapper.
+    let opened = open(&local_priv_key, frame)
+        .context("Publisher failed opening payload frame")
+        .map_err(|e| {
+            push_packet_meta_trace(
+                "ComponentError",
+                frame.len(),
+                &format!("publisher.open_layer ERROR err={e:#}"),
+                root_chain,
+                "publisher.error",
+            );
+            e
+        })?;
+
+    let payload: ChunkPayload = serde_json::from_slice(&opened)
+        .context("Publisher failed decoding ChunkPayload")
+        .map_err(|e| {
+            push_packet_meta_trace(
+                "ComponentError",
+                opened.len(),
+                &format!("publisher.decode_payload ERROR err={e:#}"),
+                root_chain,
+                "publisher.error",
+            );
+            e
+        })?;
+    let incoming_chain = payload
+        .trace_id
+        .clone()
+        .unwrap_or_else(|| root_chain.to_string());
     let ingress_chain = trace_next_chain(&incoming_chain);
     push_packet_meta_trace(
         "ComponentInput",
-        layer.inner.len(),
+        opened.len(),
         &format!(
-            "publisher.layer INPUT next_hop={:?} bytes={}",
-            layer.next_hop,
-            layer.inner.len()
+            "publisher.payload INPUT chunk_id={} chunk_index={} total_chunks={} bytes={}",
+            payload.chunk_id,
+            payload.chunk_index,
+            payload.total_chunks,
+            payload.chunk.len()
         ),
         &ingress_chain,
         "publisher.input",
     );
-    if layer.next_hop.is_some() {
-        push_packet_meta_trace(
-            "ComponentError",
-            layer.inner.len(),
-            &format!(
-                "publisher.layer ERROR expected next_hop=None, got {:?}",
-                layer.next_hop
-            ),
-            &ingress_chain,
-            "publisher.error",
-        );
-        return Err(anyhow::anyhow!(
-            "Publisher terminal layer expected next_hop=None, got {:?}",
-            layer.next_hop
-        )
-        .into());
-    }
-
-    let payload: ChunkPayload =
-        serde_json::from_slice(&layer.inner).context("Publisher failed decoding ChunkPayload")?;
     let payload_chain = payload
         .trace_id
         .clone()
@@ -484,48 +485,86 @@ async fn handle_onion_terminal_frame(
         .into());
     }
 
-    let payload_stored = match handle_payload_frame(&payload.chunk, state, &payload_chain).await {
-        Ok(()) => {
-            push_packet_meta_trace(
-                "ComponentOutput",
-                payload.chunk.len(),
-                &format!(
-                    "publisher.payload OUTPUT accepted chunk_id={} chunk_index={} bytes={} mode=stored",
-                    payload.chunk_id,
-                    payload.chunk_index,
-                    payload.chunk.len()
-                ),
-                &payload_chain,
-                "publisher.payload",
-            );
-            true
-        }
-        Err(e) => {
-            tracing::warn!(
-                "Publisher: transport accepted but packet parse/store failed chunk_id={} chunk_index={}: {e}",
-                payload.chunk_id,
-                payload.chunk_index
-            );
-            push_packet_meta_trace(
-                "ComponentOutput",
-                payload.chunk.len(),
-                &format!(
-                    "publisher.payload OUTPUT accepted chunk_id={} chunk_index={} bytes={} mode=transport_only",
-                    payload.chunk_id,
-                    payload.chunk_index,
-                    payload.chunk.len()
-                ),
-                &payload_chain,
-                "publisher.payload",
-            );
-            false
+    let (is_duplicate, _chunk_key) = {
+        let chunk_key = (payload.chunk_id, payload.chunk_index);
+        let mut seen = state.seen_chunks.lock().await;
+        if seen.contains(&chunk_key) {
+            (true, chunk_key)
+        } else {
+            seen.insert(chunk_key);
+            (false, chunk_key)
         }
     };
+
+    let payload_stored = if is_duplicate {
+        false
+    } else {
+        match handle_payload_frame(&payload.chunk, state, &payload_chain).await {
+            Ok(()) => {
+                push_packet_meta_trace(
+                    "ComponentOutput",
+                    payload.chunk.len(),
+                    &format!(
+                        "publisher.payload OUTPUT accepted chunk_id={} chunk_index={} bytes={} mode=stored",
+                        payload.chunk_id,
+                        payload.chunk_index,
+                        payload.chunk.len()
+                    ),
+                    &payload_chain,
+                    "publisher.payload",
+                );
+                true
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Publisher: transport accepted but packet parse/store failed chunk_id={} chunk_index={}: {e}",
+                    payload.chunk_id,
+                    payload.chunk_index
+                );
+                push_packet_meta_trace(
+                    "ComponentOutput",
+                    payload.chunk.len(),
+                    &format!(
+                        "publisher.payload OUTPUT accepted chunk_id={} chunk_index={} bytes={} mode=transport_only",
+                        payload.chunk_id,
+                        payload.chunk_index,
+                        payload.chunk.len()
+                    ),
+                    &payload_chain,
+                    "publisher.payload",
+                );
+                false
+            }
+        }
+    };
+    if is_duplicate {
+        push_packet_meta_trace(
+            "ComponentOutput",
+            payload.chunk.len(),
+            &format!(
+                "publisher.payload OUTPUT duplicate chunk_id={} chunk_index={} bytes={} mode=discarded",
+                payload.chunk_id,
+                payload.chunk_index,
+                payload.chunk.len()
+            ),
+            &payload_chain,
+            "publisher.payload",
+        );
+    }
+
+    let store_mode = if is_duplicate {
+        "duplicate"
+    } else if payload_stored {
+        "stored"
+    } else {
+        "transport_only"
+    };
     tracing::info!(
-        "Publisher: accepted terminal onion payload chunk_id={} chunk_index={} bytes={}",
+        "Publisher: terminal onion payload chunk_id={} chunk_index={} bytes={} mode={}",
         payload.chunk_id,
         payload.chunk_index,
-        payload.chunk.len()
+        payload.chunk.len(),
+        store_mode
     );
 
     let (ack, ack_trace) = build_publisher_ack_onion(&payload)?;
@@ -599,7 +638,8 @@ fn build_publisher_ack_onion(payload: &ChunkPayload) -> AnyResult<(Vec<u8>, Stri
     for idx in 1..dest_idx {
         let current = &payload.return_path[idx];
         let next_addr = payload.return_path[idx - 1].addr;
-        let layer_trace = response_trace_for_destination(&payload.return_path, &ack_origin_trace, idx);
+        let layer_trace =
+            response_trace_for_destination(&payload.return_path, &ack_origin_trace, idx);
         let layer = OnionLayer {
             next_hop: Some(next_addr),
             inner: sealed,

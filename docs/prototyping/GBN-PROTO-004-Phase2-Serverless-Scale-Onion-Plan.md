@@ -20,27 +20,121 @@ The path is created by the creator from its DHT which has been populated by the 
 
 ```
 layer_pub  = seal(publisher_pub,  { next_hop: None,chunk_payload, chunk_id, chunk_hash, return_path, send_timestamp, total_chunks, chunk_index })
-layer_exit = seal(exit_pub,       { next_hop: publisher_addr, inner: layer_pub  })
-layer_mid  = seal(middle_pub,     { next_hop: exit_addr,      inner: layer_exit })
-layer_grd  = seal(guard_pub,      { next_hop: middle_addr,    inner: layer_mid  })
+layer_exit = seal(exit_pub,       { next_hop: publisher_addr}) + layer_pub 
+layer_mid  = seal(middle_pub,     { next_hop: exit_addr}) + layer_pub 
+layer_grd  = seal(guard_pub,      { next_hop: middle_addr}) + layer_pub 
 ```
 
 Creator sends `layer_grd` over TCP to Guard.
 
 **Each relay (Guard / Middle / Exit):**
 1. Read length-prefixed bytes from TCP
-2. `open(own_priv, bytes)` → `{ next_hop, inner }`
-3. Connect to `next_hop`, write `inner` as length-prefixed bytes
+2. `open(own_priv)` → `{ next_hop}`
+3. Connect to `next_hop`, write `layer_pub` as length-prefixed bytes
 4. (No response needed for data forwarding)
 
 **Publisher:**
-1. `open(own_priv, bytes)` → `{ next_hop: None,chunk_payload, chunk_id, chunk_hash, return_path, send_timestamp, total_chunks, chunk_index }`
+1. `open(layer_pub)` → `{ next_hop: None,chunk_payload, chunk_id, chunk_hash, return_path, send_timestamp, total_chunks, chunk_index }`
 2. Verify hash, store chunk
 3. Build reverse-direction ACK (ChunkID, Receive Timestamp, Hash, ChunkIndex) onion using `return_path` → send back to Creator
 
 **ACK return path**: Publisher → Exit → Middle → Guard → Creator
 Creator must listen on an ACK port; return_path contains Creator's ack address.
 
+---
+
+## DHT Population And Validation
+
+The DHT is now populated through separate discovery, direct-liveness, and routing-validation mechanisms. A node appearing in the DHT does not automatically mean it is trusted for routing.
+
+### Population paths
+
+1. NodeAnnounce
+   Periodic PlumTree self-announcement used for wide discovery and eventual convergence.
+
+2. DirectNodeAnnounce
+   Immediate direct self-announcement exchanged when two peers connect on the gossip plane.
+
+3. DirectNodePropagate
+   Every 10 seconds, a node sends a sampled batch of its freshest live DHT entries to a sampled subset of neighbors.
+
+4. DirectNodeProbe / DirectNodeProbeResponse
+   A node first learned through propagation is queued for direct validation. Only the direct probe response populates last_direct_seen_ms.
+
+### Local DHT entry fields
+
+~~~text
++-------------------------+----------------------------------------------+
+| Field                   | Meaning                                      |
++-------------------------+----------------------------------------------+
+| addr                    | Onion ingress socket address                 |
+| identity_pub            | Public key used for onion encryption         |
+| subnet_tag              | Hostile / Free / Seed / Creator / Publisher  |
+| announce_ts_ms          | Node's own latest self-announced timestamp   |
+| last_direct_seen_ms     | Last time this node was heard directly       |
+| last_propagated_seen_ms | Last time this node was heard via propagate  |
+| last_observed_ms        | Most recent local observation of any kind    |
+| validation_state        | propagated_only / unvalidated / direct /     |
+|                         | complete / isolated                          |
+| validation_score        | Routing confidence score                     |
++-------------------------+----------------------------------------------+
+~~~
+
+### Validation states
+
+~~~text
+propagated_only
+  Discovered indirectly. Not trusted for routing. Inbound propagated DHT
+  updates from this node are ignored.
+
+unvalidated
+  Directly seen for the first time. validation_score is seeded to 10, but the
+  node is still not trusted for general path selection.
+
+direct
+  The node has participated in at least one successful chunk path that produced
+  a publisher ACK. It is usable, but still in the preliminary validation period.
+
+complete
+  validation_score > 20. The node is fully trusted for routing and its
+  DirectNodePropagate updates are accepted for DHT growth.
+
+isolated
+  validation_score == 0. The node remains in the DHT until stale cleanup, but
+  it is excluded from path construction.
+~~~
+
+### Validation score rules
+
+~~~text
+First direct sighting              -> validation_score := max(score, 10)
+First direct sighting              -> validation_state = unvalidated
+Successful ACKed chunk             -> validation_score += 1
+First ACK while unvalidated        -> validation_state = direct
+Score > 20                         -> validation_state = complete
+Failed routed chunk                -> validation_score -= 1
+Score == 0                         -> validation_state = isolated
+~~~
+
+### Lazy validation during payload sends
+
+New nodes are validated using real traffic, not a separate synthetic test circuit.
+
+- Guard and Exit stay validated nodes.
+- An unvalidated node is introduced only as a **middle** relay in a canary path.
+- The Creator pairs that canary chunk with a sibling chunk that uses the same
+  Guard and Exit but swaps in a validated middle.
+- If both chunks succeed, the candidate middle gains score and can be promoted.
+- If the baseline succeeds and the canary fails, only the candidate middle is
+  penalized.
+
+### Trust boundary for DHT growth
+
+- PlumTree broadcast is discovery.
+- Direct probe/response is direct liveness evidence.
+- Publisher ACKed chunk delivery is routing evidence.
+- Only complete nodes are allowed to influence DHT growth through accepted
+  DirectNodePropagate batches.
 ---
 
 ## Encryption Primitive

@@ -6,8 +6,9 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["distributed-trace"]
+default = ["distributed-trace", "dht-validation-policy"]
 distributed-trace = []
+dht-validation-policy = []
 
 [dependencies]
 gbn-protocol = { path = "../gbn-protocol" }

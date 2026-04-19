@@ -29,20 +29,21 @@ use mcn_router_sim::{
         build_circuits_speculative, log_path_diversity, select_exit_candidates, CircuitManager,
     },
     control::spawn_control_server,
-    gossip::GbnGossipMsg,
     create_multipath_router,
+    gossip::GbnGossipMsg,
     observability::{
         publish_chunks_reassembled_from_env, publish_circuit_build_result_from_env,
         publish_path_diversity_from_env,
     },
-    relay_engine, swarm::{self, SwarmControlCmd},
+    relay_engine,
+    swarm::{self, SwarmControlCmd},
 };
-use std::sync::{Arc, RwLock};
-use tokio::sync::mpsc;
 use mcn_sanitizer::{is_ffmpeg_available, sanitize_video};
 use mpub_receiver::{Receiver, SENTINEL_MAGIC};
 use rand::RngCore;
 use rand_chacha::{rand_core::SeedableRng, ChaCha8Rng};
+use std::sync::{Arc, RwLock};
+use tokio::sync::mpsc;
 
 /// Deterministic seed for synthetic payload — same constant on Creator and Publisher
 /// so the Publisher can independently compute the expected BLAKE3 hash.
@@ -217,7 +218,10 @@ async fn main() -> Result<()> {
                     &c,
                     "mcn-sanitizer",
                     "sanitize_video",
-                    &format!("input_size={},output_size={}", report.input_size, report.output_size),
+                    &format!(
+                        "input_size={},output_size={}",
+                        report.input_size, report.output_size
+                    ),
                     report.output_size as usize,
                 );
                 trace_chain = c;
@@ -291,18 +295,22 @@ async fn main() -> Result<()> {
                 "create_upload_session",
                 &format!("total_chunks={}", manifest.total_chunks),
             );
-            let session = match create_upload_session(&pub_key, manifest.total_chunks, original_hash) {
-                Ok(s) => s,
-                Err(e) => {
-                    trace_error(&c, "mcn-crypto", "create_upload_session", &e.to_string());
-                    return Err(e.into());
-                }
-            };
+            let session =
+                match create_upload_session(&pub_key, manifest.total_chunks, original_hash) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        trace_error(&c, "mcn-crypto", "create_upload_session", &e.to_string());
+                        return Err(e.into());
+                    }
+                };
             trace_output(
                 &c,
                 "mcn-crypto",
                 "create_upload_session",
-                &format!("session_id={}", hex::encode(session.session_init.session_id)),
+                &format!(
+                    "session_id={}",
+                    hex::encode(session.session_init.session_id)
+                ),
                 0,
             );
             trace_chain = c;
@@ -353,13 +361,21 @@ async fn main() -> Result<()> {
                 "create_multipath_router",
                 &format!("paths={},hops={}", receiver_handle.bound_addrs.len(), hops),
             );
-            let router = match create_multipath_router(receiver_handle.bound_addrs.clone(), hops, 50, 100).await {
-                Ok(r) => r,
-                Err(e) => {
-                    trace_error(&c, "mcn-router-sim", "create_multipath_router", &e.to_string());
-                    return Err(e.into());
-                }
-            };
+            let router =
+                match create_multipath_router(receiver_handle.bound_addrs.clone(), hops, 50, 100)
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        trace_error(
+                            &c,
+                            "mcn-router-sim",
+                            "create_multipath_router",
+                            &e.to_string(),
+                        );
+                        return Err(e.into());
+                    }
+                };
             trace_output(&c, "mcn-router-sim", "create_multipath_router", "ok", 0);
             trace_chain = c;
             println!("   Network ready in {}ms", t.elapsed().as_millis());
@@ -382,7 +398,13 @@ async fn main() -> Result<()> {
                         return Err(e.into());
                     }
                 };
-                trace_output(&c, "mcn-crypto", "encrypt_chunk", "ok", packet.ciphertext.len());
+                trace_output(
+                    &c,
+                    "mcn-crypto",
+                    "encrypt_chunk",
+                    "ok",
+                    packet.ciphertext.len(),
+                );
 
                 let c2 = trace_input(
                     &c,
@@ -394,7 +416,13 @@ async fn main() -> Result<()> {
                     trace_error(&c2, "mcn-router-sim", "Router::send_chunk", &e.to_string());
                     return Err(e.into());
                 }
-                trace_output(&c2, "mcn-router-sim", "Router::send_chunk", "ok", packet.ciphertext.len());
+                trace_output(
+                    &c2,
+                    "mcn-router-sim",
+                    "Router::send_chunk",
+                    "ok",
+                    packet.ciphertext.len(),
+                );
                 trace_chain = c2;
             }
             println!(
@@ -418,7 +446,12 @@ async fn main() -> Result<()> {
             {
                 Ok(s) => s,
                 Err(e) => {
-                    trace_error(&c, "mpub-receiver", "ReceiverHandle::await_session", &e.to_string());
+                    trace_error(
+                        &c,
+                        "mpub-receiver",
+                        "ReceiverHandle::await_session",
+                        &e.to_string(),
+                    );
                     return Err(e.into());
                 }
             };
@@ -452,10 +485,21 @@ async fn main() -> Result<()> {
                 &session.session_init,
                 &manifest,
             ) {
-                trace_error(&c, "mpub-receiver", "CompletedSession::decrypt_and_reassemble", &e.to_string());
+                trace_error(
+                    &c,
+                    "mpub-receiver",
+                    "CompletedSession::decrypt_and_reassemble",
+                    &e.to_string(),
+                );
                 return Err(e.into());
             }
-            trace_output(&c, "mpub-receiver", "CompletedSession::decrypt_and_reassemble", "ok", 0);
+            trace_output(
+                &c,
+                "mpub-receiver",
+                "CompletedSession::decrypt_and_reassemble",
+                "ok",
+                0,
+            );
             trace_chain = c;
             println!("   Wrote reassembled file in {}ms", t.elapsed().as_millis());
 
@@ -470,11 +514,22 @@ async fn main() -> Result<()> {
             let matched = match completed.verify(original_hash, &reassembled_path) {
                 Ok(v) => v,
                 Err(e) => {
-                    trace_error(&c, "mpub-receiver", "CompletedSession::verify", &e.to_string());
+                    trace_error(
+                        &c,
+                        "mpub-receiver",
+                        "CompletedSession::verify",
+                        &e.to_string(),
+                    );
                     return Err(e.into());
                 }
             };
-            trace_output(&c, "mpub-receiver", "CompletedSession::verify", &format!("matched={matched}"), 0);
+            trace_output(
+                &c,
+                "mpub-receiver",
+                "CompletedSession::verify",
+                &format!("matched={matched}"),
+                0,
+            );
             if matched {
                 println!("   SUCCESS! Reassembled SHA-256 matches perfectly.");
             } else {
@@ -529,13 +584,23 @@ async fn main() -> Result<()> {
                 "relay" => {
                     let mut trace_chain = String::new();
                     let local_key = libp2p::identity::Keypair::generate_ed25519();
-                    let c = trace_input(&trace_chain, "mcn-router-sim", "swarm::build_swarm", "role=relay");
+                    let c = trace_input(
+                        &trace_chain,
+                        "mcn-router-sim",
+                        "swarm::build_swarm",
+                        "role=relay",
+                    );
                     let mut swarm_handle = swarm::build_swarm(local_key).await.map_err(|e| {
                         trace_error(&c, "mcn-router-sim", "swarm::build_swarm", &e.to_string());
                         e
                     })?;
                     trace_output(&c, "mcn-router-sim", "swarm::build_swarm", "ok", 0);
-                    let c2 = trace_input(&c, "mcn-router-sim", "GossipRuntime::from_env", "role=relay");
+                    let c2 = trace_input(
+                        &c,
+                        "mcn-router-sim",
+                        "GossipRuntime::from_env",
+                        "role=relay",
+                    );
                     let mut runtime = swarm::GossipRuntime::from_env(seed_store.clone()).await;
                     trace_output(&c2, "mcn-router-sim", "GossipRuntime::from_env", "ok", 0);
                     trace_chain = c2;
@@ -552,16 +617,24 @@ async fn main() -> Result<()> {
                         "relay_engine::spawn_onion_relay",
                         &format!("listen={onion_addr}"),
                     );
-                    let onion_handle = relay_engine::spawn_onion_relay(
-                        onion_addr,
-                        noise_priv_key,
-                    )
-                    .await
-                    .map_err(|e| {
-                        trace_error(&c3, "mcn-router-sim", "relay_engine::spawn_onion_relay", &e.to_string());
-                        e
-                    })?;
-                    trace_output(&c3, "mcn-router-sim", "relay_engine::spawn_onion_relay", "ok", 0);
+                    let onion_handle = relay_engine::spawn_onion_relay(onion_addr, noise_priv_key)
+                        .await
+                        .map_err(|e| {
+                            trace_error(
+                                &c3,
+                                "mcn-router-sim",
+                                "relay_engine::spawn_onion_relay",
+                                &e.to_string(),
+                            );
+                            e
+                        })?;
+                    trace_output(
+                        &c3,
+                        "mcn-router-sim",
+                        "relay_engine::spawn_onion_relay",
+                        "ok",
+                        0,
+                    );
                     tracing::info!("Relay: onion engine listening on :{}", onion_port);
 
                     swarm::run_swarm_until_ctrl_c(&mut swarm_handle, &mut runtime, ctrl_rx).await?;
@@ -572,13 +645,23 @@ async fn main() -> Result<()> {
                     let trace_chain = String::new();
                     // P2: Gossip swarm + background circuit build + upload
                     let local_key = libp2p::identity::Keypair::generate_ed25519();
-                    let c = trace_input(&trace_chain, "mcn-router-sim", "swarm::build_swarm", "role=creator");
+                    let c = trace_input(
+                        &trace_chain,
+                        "mcn-router-sim",
+                        "swarm::build_swarm",
+                        "role=creator",
+                    );
                     let mut swarm_handle = swarm::build_swarm(local_key).await.map_err(|e| {
                         trace_error(&c, "mcn-router-sim", "swarm::build_swarm", &e.to_string());
                         e
                     })?;
                     trace_output(&c, "mcn-router-sim", "swarm::build_swarm", "ok", 0);
-                    let c2 = trace_input(&c, "mcn-router-sim", "GossipRuntime::from_env", "role=creator");
+                    let c2 = trace_input(
+                        &c,
+                        "mcn-router-sim",
+                        "GossipRuntime::from_env",
+                        "role=creator",
+                    );
                     let mut runtime = swarm::GossipRuntime::from_env(seed_store.clone()).await;
                     trace_output(&c2, "mcn-router-sim", "GossipRuntime::from_env", "ok", 0);
 
@@ -599,7 +682,8 @@ async fn main() -> Result<()> {
                         );
                         tokio::time::sleep(Duration::from_secs(circuit_delay_secs)).await;
                         tracing::info!("Creator: starting circuit build and upload sequence");
-                        if let Err(e) = run_creator_upload(target_circuits, upload_seed_store).await {
+                        if let Err(e) = run_creator_upload(target_circuits, upload_seed_store).await
+                        {
                             tracing::error!("Creator circuit/upload failed: {e:#}");
                         }
                     });
@@ -656,14 +740,25 @@ async fn main() -> Result<()> {
 
                     // Also run gossip swarm for Cloud Map keepalive
                     let local_key = libp2p::identity::Keypair::generate_ed25519();
-                    let c3 = trace_input(&trace_chain, "mcn-router-sim", "swarm::build_swarm", "role=publisher");
+                    let c3 = trace_input(
+                        &trace_chain,
+                        "mcn-router-sim",
+                        "swarm::build_swarm",
+                        "role=publisher",
+                    );
                     let mut swarm_handle = swarm::build_swarm(local_key).await.map_err(|e| {
                         trace_error(&c3, "mcn-router-sim", "swarm::build_swarm", &e.to_string());
                         e
                     })?;
                     trace_output(&c3, "mcn-router-sim", "swarm::build_swarm", "ok", 0);
-                    let c4 = trace_input(&c3, "mcn-router-sim", "GossipRuntime::from_env", "role=publisher");
-                    let mut gossip_runtime = swarm::GossipRuntime::from_env(seed_store.clone()).await;
+                    let c4 = trace_input(
+                        &c3,
+                        "mcn-router-sim",
+                        "GossipRuntime::from_env",
+                        "role=publisher",
+                    );
+                    let mut gossip_runtime =
+                        swarm::GossipRuntime::from_env(seed_store.clone()).await;
                     trace_output(&c4, "mcn-router-sim", "GossipRuntime::from_env", "ok", 0);
                     trace_chain = c4;
 
@@ -734,11 +829,11 @@ async fn main() -> Result<()> {
                                     if !nodes.is_empty() {
                                         let msg = GbnGossipMsg::DirectorySync(nodes);
                                         let payload = serde_json::to_vec(&msg).unwrap();
-                                        
+
                                         let mut msg_id = [0u8; 32];
                                         let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
                                         msg_id[0..8].copy_from_slice(&ts.to_le_bytes());
-                                        msg_id[8..16].copy_from_slice(&0x5EED_5EED_u64.to_le_bytes()); 
+                                        msg_id[8..16].copy_from_slice(&0x5EED_5EED_u64.to_le_bytes());
 
                                         let outbound = gossip_runtime.engine.publish_local(msg_id, payload);
                                         for out_msg in outbound {
@@ -923,7 +1018,10 @@ async fn main() -> Result<()> {
 /// Full Creator circuit-build + upload sequence.
 ///
 /// Called from a background task after `GBN_CIRCUIT_DELAY_SECS` gossip stabilization.
-async fn run_creator_upload(target_circuits: usize, seed_store: Arc<RwLock<HashMap<SocketAddr, mcn_router_sim::circuit_manager::RelayNode>>>) -> Result<()> {
+async fn run_creator_upload(
+    target_circuits: usize,
+    seed_store: Arc<RwLock<HashMap<SocketAddr, mcn_router_sim::circuit_manager::RelayNode>>>,
+) -> Result<()> {
     let mut trace_chain = String::new();
     let circuit_build_start = Instant::now();
 
@@ -937,11 +1035,22 @@ async fn run_creator_upload(target_circuits: usize, seed_store: Arc<RwLock<HashM
     let noise_priv_key = match load_noise_privkey_from_env() {
         Ok(k) => k,
         Err(e) => {
-            trace_error(&c, "mcn-crypto", "load_noise_privkey_from_env", &e.to_string());
+            trace_error(
+                &c,
+                "mcn-crypto",
+                "load_noise_privkey_from_env",
+                &e.to_string(),
+            );
             return Err(e.context("Creator: failed to load Noise private key"));
         }
     };
-    trace_output(&c, "mcn-crypto", "load_noise_privkey_from_env", "ok", noise_priv_key.len());
+    trace_output(
+        &c,
+        "mcn-crypto",
+        "load_noise_privkey_from_env",
+        "ok",
+        noise_priv_key.len(),
+    );
     trace_chain = c;
 
     // 2. Discover relay nodes from Cloud Map — retry for up to 5 minutes.
@@ -1022,7 +1131,12 @@ async fn run_creator_upload(target_circuits: usize, seed_store: Arc<RwLock<HashM
     let (publisher_addr, pub_key_bytes) = swarm::discover_publisher_static()
         .await
         .map_err(|e| {
-            trace_error(&c, "mcn-router-sim", "discover_publisher_static", &e.to_string());
+            trace_error(
+                &c,
+                "mcn-router-sim",
+                "discover_publisher_static",
+                &e.to_string(),
+            );
             e
         })
         .context("Creator: failed to discover Publisher from static env configuration")?;
@@ -1030,7 +1144,11 @@ async fn run_creator_upload(target_circuits: usize, seed_store: Arc<RwLock<HashM
         &c,
         "mcn-router-sim",
         "discover_publisher_static",
-        &format!("addr={} pubkey={}", publisher_addr, hex::encode(pub_key_bytes)),
+        &format!(
+            "addr={} pubkey={}",
+            publisher_addr,
+            hex::encode(pub_key_bytes)
+        ),
         pub_key_bytes.len(),
     );
     trace_chain = c;
@@ -1067,7 +1185,12 @@ async fn run_creator_upload(target_circuits: usize, seed_store: Arc<RwLock<HashM
     )
     .await
     .map_err(|e| {
-        trace_error(&c, "mcn-router-sim", "build_circuits_speculative", &e.to_string());
+        trace_error(
+            &c,
+            "mcn-router-sim",
+            "build_circuits_speculative",
+            &e.to_string(),
+        );
         e
     })?;
     trace_output(
@@ -1154,15 +1277,19 @@ async fn run_creator_upload(target_circuits: usize, seed_store: Arc<RwLock<HashM
         "create_upload_session",
         &format!("total_chunks={}", manifest.total_chunks),
     );
-    let session = create_upload_session(&pub_key_bytes, manifest.total_chunks, payload_hash).map_err(|e| {
-        trace_error(&c, "mcn-crypto", "create_upload_session", &e.to_string());
-        e
-    })?;
+    let session = create_upload_session(&pub_key_bytes, manifest.total_chunks, payload_hash)
+        .map_err(|e| {
+            trace_error(&c, "mcn-crypto", "create_upload_session", &e.to_string());
+            e
+        })?;
     trace_output(
         &c,
         "mcn-crypto",
         "create_upload_session",
-        &format!("session_id={}", hex::encode(session.session_init.session_id)),
+        &format!(
+            "session_id={}",
+            hex::encode(session.session_init.session_id)
+        ),
         0,
     );
     trace_chain = c;
@@ -1192,7 +1319,12 @@ async fn run_creator_upload(target_circuits: usize, seed_store: Arc<RwLock<HashM
         .send_chunk(u32::MAX, sentinel_payload.clone())
         .await
         .map_err(|e| {
-            trace_error(&c, "mcn-router-sim", "CircuitManager::send_chunk", &e.to_string());
+            trace_error(
+                &c,
+                "mcn-router-sim",
+                "CircuitManager::send_chunk",
+                &e.to_string(),
+            );
             e
         })
         .context("Creator: failed to send UploadSessionInit sentinel")?;
@@ -1223,11 +1355,19 @@ async fn run_creator_upload(target_circuits: usize, seed_store: Arc<RwLock<HashM
             "encrypt_chunk",
             &format!("chunk_index={i},len={}", chunk_data.len()),
         );
-        let packet = session.encrypt_chunk(i, chunk_data, info.hash).map_err(|e| {
-            trace_error(&c, "mcn-crypto", "encrypt_chunk", &e.to_string());
-            e
-        })?;
-        trace_output(&c, "mcn-crypto", "encrypt_chunk", "ok", packet.ciphertext.len());
+        let packet = session
+            .encrypt_chunk(i, chunk_data, info.hash)
+            .map_err(|e| {
+                trace_error(&c, "mcn-crypto", "encrypt_chunk", &e.to_string());
+                e
+            })?;
+        trace_output(
+            &c,
+            "mcn-crypto",
+            "encrypt_chunk",
+            "ok",
+            packet.ciphertext.len(),
+        );
         let packet_bytes = serde_json::to_vec(&packet)?;
         let c2 = trace_input(
             &c,
@@ -1239,11 +1379,22 @@ async fn run_creator_upload(target_circuits: usize, seed_store: Arc<RwLock<HashM
             .send_chunk(i, packet_bytes)
             .await
             .map_err(|e| {
-                trace_error(&c2, "mcn-router-sim", "CircuitManager::send_chunk", &e.to_string());
+                trace_error(
+                    &c2,
+                    "mcn-router-sim",
+                    "CircuitManager::send_chunk",
+                    &e.to_string(),
+                );
                 e
             })
             .with_context(|| format!("Creator: failed to send chunk {i}"))?;
-        trace_output(&c2, "mcn-router-sim", "CircuitManager::send_chunk", "ok", chunk_data.len());
+        trace_output(
+            &c2,
+            "mcn-router-sim",
+            "CircuitManager::send_chunk",
+            "ok",
+            chunk_data.len(),
+        );
         trace_chain = c2;
     }
 

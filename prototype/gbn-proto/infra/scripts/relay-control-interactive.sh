@@ -585,9 +585,9 @@ _do_send_dummy_scale() {
   chunk_count="${chunk_count:-10}"
   [[ "$chunk_count" =~ ^[1-9][0-9]*$ ]] || { echo "  Defaulting to 10." >&2; chunk_count=10; }
 
-  read -r -p "  Chunk size in bytes [8192]: " chunk_size
-  chunk_size="${chunk_size:-8192}"
-  [[ "$chunk_size" =~ ^[1-9][0-9]*$ ]] || { echo "  Defaulting to 8192." >&2; chunk_size=8192; }
+  read -r -p "  Chunk size in bytes [32768]: " chunk_size
+  chunk_size="${chunk_size:-32768}"
+  [[ "$chunk_size" =~ ^[1-9][0-9]*$ ]] || { echo "  Defaulting to 32768." >&2; chunk_size=32768; }
 
   local total_bytes
   total_bytes="$(python3 -c "print(${chunk_count} * ${chunk_size})")"

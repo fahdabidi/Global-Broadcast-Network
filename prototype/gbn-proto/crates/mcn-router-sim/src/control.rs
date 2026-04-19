@@ -1,8 +1,8 @@
-use crate::circuit_manager::{CircuitManager, RelayNode};
+use crate::circuit_manager::{CircuitManager, RelayNode, ValidationState};
 use crate::swarm::SwarmControlCmd;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -50,14 +50,22 @@ pub struct ScaleChunkResult {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type")]
 pub enum ControlResponse {
-    Ok { msg: String },
+    Ok {
+        msg: String,
+    },
     DhtData {
         store: Vec<RelayNode>,
         kademlia_buckets: Vec<String>,
     },
-    Metadata { packets: Vec<PacketMeta> },
-    Error { reason: String },
-    TraceId { chain_id: String },
+    Metadata {
+        packets: Vec<PacketMeta>,
+    },
+    Error {
+        reason: String,
+    },
+    TraceId {
+        chain_id: String,
+    },
     ScaleResult {
         chunks: Vec<ScaleChunkResult>,
         acked: usize,
@@ -102,13 +110,151 @@ fn next_chain(parent: &str) -> String {
     }
 }
 
-const SEND_DUMMY_FRAGMENT_SIZE: usize = 8 * 1024;
+const SEND_DUMMY_FRAGMENT_SIZE: usize = 32 * 1024;
+const SEND_DUMMY_MAX_ATTEMPTS: usize = 8;
+#[cfg(feature = "dht-validation-policy")]
+const NODE_VALIDATION_COMPLETE_SCORE: u32 = 20;
 
 fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+fn is_relay_node(node: &RelayNode) -> bool {
+    node.subnet_tag == "HostileSubnet" || node.subnet_tag == "FreeSubnet"
+}
+
+fn path_key(
+    guard: &RelayNode,
+    middle: &RelayNode,
+    exit: &RelayNode,
+) -> (SocketAddr, SocketAddr, SocketAddr) {
+    (guard.addr, middle.addr, exit.addr)
+}
+
+fn build_candidate_paths(
+    explicit_route: Option<(RelayNode, RelayNode, RelayNode)>,
+    peers: &[RelayNode],
+) -> Vec<(RelayNode, RelayNode, RelayNode)> {
+    let mut paths = Vec::new();
+    let mut seen = HashSet::new();
+
+    if peers.len() < 3 {
+        return paths;
+    }
+
+    let mut exit_candidates: Vec<RelayNode> = peers
+        .iter()
+        .filter(|p| p.subnet_tag == "FreeSubnet")
+        .cloned()
+        .collect();
+    if exit_candidates.is_empty() {
+        exit_candidates = peers.to_vec();
+    }
+
+    let mut add_path = |guard: RelayNode, middle: RelayNode, exit: RelayNode| {
+        let key = path_key(&guard, &middle, &exit);
+        if seen.insert(key) {
+            paths.push((guard, middle, exit));
+        }
+    };
+
+    if let Some((guard, middle, exit)) = explicit_route {
+        if peers.iter().any(|p| p.addr == guard.addr)
+            && peers.iter().any(|p| p.addr == middle.addr)
+            && peers.iter().any(|p| p.addr == exit.addr)
+        {
+            if guard.addr != middle.addr && middle.addr != exit.addr && guard.addr != exit.addr {
+                add_path(guard, middle, exit);
+            }
+        }
+    }
+
+    for guard in peers {
+        for middle in peers {
+            if guard.addr == middle.addr {
+                continue;
+            }
+            for exit in &exit_candidates {
+                if guard.addr == exit.addr || middle.addr == exit.addr {
+                    continue;
+                }
+                add_path(guard.clone(), middle.clone(), exit.clone());
+            }
+        }
+    }
+
+    paths
+}
+
+fn live_relay_nodes(seed_store: &Arc<RwLock<HashMap<SocketAddr, RelayNode>>>) -> Vec<RelayNode> {
+    let store = seed_store.read().unwrap();
+    let mut peers = store.values().filter(|node| is_relay_node(node)).cloned().collect::<Vec<_>>();
+    #[cfg(feature = "dht-validation-policy")]
+    {
+        peers.retain(is_path_eligible_node);
+        peers.sort_unstable_by(|a, b| {
+            let a_state = if a.validation_state == ValidationState::Complete { 1 } else { 0 };
+            let b_state = if b.validation_state == ValidationState::Complete { 1 } else { 0 };
+            b_state
+                .cmp(&a_state)
+                .then_with(|| b.validation_score.cmp(&a.validation_score))
+                .then_with(|| {
+                    let a_ts = a.last_direct_seen_ms.unwrap_or(0);
+                    let b_ts = b.last_direct_seen_ms.unwrap_or(0);
+                    b_ts.cmp(&a_ts)
+                })
+                .then_with(|| a.addr.cmp(&b.addr))
+        });
+    }
+    #[cfg(not(feature = "dht-validation-policy"))]
+    {
+        peers.sort_unstable_by_key(|p| p.addr);
+    }
+    peers
+}
+
+#[cfg(feature = "dht-validation-policy")]
+fn is_path_eligible_node(node: &RelayNode) -> bool {
+    matches!(
+        node.validation_state,
+        ValidationState::Direct | ValidationState::Complete
+    ) && node.validation_score > 0
+}
+
+#[cfg(feature = "dht-validation-policy")]
+fn apply_node_path_result(
+    seed_store: &Arc<RwLock<HashMap<SocketAddr, RelayNode>>>,
+    addrs: &[SocketAddr],
+    acked: bool,
+) {
+    let mut store = seed_store.write().unwrap();
+    for addr in addrs {
+        if let Some(node) = store.get_mut(&addr) {
+            if acked {
+                node.validation_score = node.validation_score.saturating_add(1);
+                match node.validation_state {
+                    ValidationState::Unvalidated | ValidationState::Direct => {
+                        if node.validation_score > NODE_VALIDATION_COMPLETE_SCORE {
+                            node.validation_state = ValidationState::Complete;
+                        } else {
+                            node.validation_state = ValidationState::Direct;
+                        }
+                    }
+                    ValidationState::Complete => {}
+                    ValidationState::Isolated => {}
+                    ValidationState::PropagatedOnly => {}
+                }
+            } else {
+                node.validation_score = node.validation_score.saturating_sub(1);
+                if node.validation_score == 0 {
+                    node.validation_state = ValidationState::Isolated;
+                }
+            }
+        }
+    }
 }
 
 pub fn push_packet_meta(action: &str, size_bytes: usize, info: &str) {
@@ -205,7 +351,8 @@ pub async fn spawn_control_server(
                                     if line.trim().is_empty() {
                                         continue;
                                     }
-                                    let req_res: Result<ControlRequest, _> = serde_json::from_str(line.trim());
+                                    let req_res: Result<ControlRequest, _> =
+                                        serde_json::from_str(line.trim());
                                     match req_res {
                                         Ok(req) => {
                                             // For SendDummy: emit chain_id immediately before async work begins.
@@ -214,17 +361,35 @@ pub async fn spawn_control_server(
                                                 | ControlRequest::SendScale { .. } => {
                                                     let chain = next_chain("");
                                                     let pre_json = serde_json::to_string(
-                                                        &ControlResponse::TraceId { chain_id: chain.clone() }
-                                                    ).unwrap_or_default();
-                                                    let _ = write.write_all(format!("{}\n", pre_json).as_bytes()).await;
+                                                        &ControlResponse::TraceId {
+                                                            chain_id: chain.clone(),
+                                                        },
+                                                    )
+                                                    .unwrap_or_default();
+                                                    let _ = write
+                                                        .write_all(
+                                                            format!("{}\n", pre_json).as_bytes(),
+                                                        )
+                                                        .await;
                                                     let _ = write.flush().await;
                                                     Some(chain)
                                                 }
                                                 _ => None,
                                             };
-                                            let resp = handle_request(req, &seed_store, &swarm_tx, priv_key, pre_chain).await;
-                                            let resp_json = serde_json::to_string(&resp).unwrap_or_default();
-                                            if let Err(e) = write.write_all(format!("{}\n", resp_json).as_bytes()).await {
+                                            let resp = handle_request(
+                                                req,
+                                                &seed_store,
+                                                &swarm_tx,
+                                                priv_key,
+                                                pre_chain,
+                                            )
+                                            .await;
+                                            let resp_json =
+                                                serde_json::to_string(&resp).unwrap_or_default();
+                                            if let Err(e) = write
+                                                .write_all(format!("{}\n", resp_json).as_bytes())
+                                                .await
+                                            {
                                                 warn!("Failed writing to control client: {e}");
                                                 break;
                                             }
@@ -234,12 +399,25 @@ pub async fn spawn_control_server(
                                             push_packet_meta_trace(
                                                 "ComponentError",
                                                 line.len(),
-                                                &format!("control.parse_request ERROR err={e} raw={}", line.trim()),
+                                                &format!(
+                                                    "control.parse_request ERROR err={e} raw={}",
+                                                    line.trim()
+                                                ),
                                                 &chain,
                                                 "component.error",
                                             );
-                                            let err = ControlResponse::Error { reason: format!("Bad request: {e}") };
-                                            let _ = write.write_all(format!("{}\n", serde_json::to_string(&err).unwrap()).as_bytes()).await;
+                                            let err = ControlResponse::Error {
+                                                reason: format!("Bad request: {e}"),
+                                            };
+                                            let _ = write
+                                                .write_all(
+                                                    format!(
+                                                        "{}\n",
+                                                        serde_json::to_string(&err).unwrap()
+                                                    )
+                                                    .as_bytes(),
+                                                )
+                                                .await;
                                         }
                                     }
                                 }
@@ -285,7 +463,9 @@ async fn handle_request(
                     &chain,
                     "component.error",
                 );
-                return ControlResponse::Error { reason: "Swarm loop disconnected".into() };
+                return ControlResponse::Error {
+                    reason: "Swarm loop disconnected".into(),
+                };
             }
 
             let kademlia_buckets = match rx.recv().await {
@@ -294,7 +474,31 @@ async fn handle_request(
             };
 
             let mut store: Vec<RelayNode> = seed_store.read().unwrap().values().cloned().collect();
-            store.sort_unstable_by(|a, b| b.last_seen_ms.cmp(&a.last_seen_ms));
+            #[cfg(feature = "dht-validation-policy")]
+            {
+                store.sort_unstable_by(|a, b| {
+                    let rank = |node: &RelayNode| match node.validation_state {
+                        ValidationState::Complete => 3,
+                        ValidationState::Direct => 2,
+                        ValidationState::Unvalidated => 1,
+                        ValidationState::PropagatedOnly => 0,
+                        ValidationState::Isolated => -1,
+                    };
+                    rank(b)
+                        .cmp(&rank(a))
+                        .then_with(|| b.validation_score.cmp(&a.validation_score))
+                        .then_with(|| {
+                            let a_direct = a.last_direct_seen_ms.unwrap_or(0);
+                            let b_direct = b.last_direct_seen_ms.unwrap_or(0);
+                            b_direct.cmp(&a_direct)
+                        })
+                        .then_with(|| b.last_observed_ms.cmp(&a.last_observed_ms))
+                });
+            }
+            #[cfg(not(feature = "dht-validation-policy"))]
+            {
+                store.sort_unstable_by(|a, b| b.last_seen_ms.cmp(&a.last_seen_ms));
+            }
             push_packet_meta_trace(
                 "ComponentOutput",
                 store.len(),
@@ -338,9 +542,14 @@ async fn handle_request(
                         .iter()
                         .filter(|p| {
                             #[cfg(feature = "distributed-trace")]
-                            { p.id_chain.contains(cid.as_str()) }
+                            {
+                                p.id_chain.contains(cid.as_str())
+                            }
                             #[cfg(not(feature = "distributed-trace"))]
-                            { let _ = cid; true }
+                            {
+                                let _ = cid;
+                                true
+                            }
                         })
                         .take(effective_limit)
                         .cloned()
@@ -378,31 +587,52 @@ async fn handle_request(
                 &chain,
                 "component.output",
             );
-            ControlResponse::Ok { msg: "CloudMap local seed broadcast queued".to_string() }
+            ControlResponse::Ok {
+                msg: "CloudMap local seed broadcast queued".to_string(),
+            }
         }
         ControlRequest::UnicastDHT { target_addr } => {
             let chain = next_chain("");
             push_packet_meta_trace(
-                "ComponentInput", 0,
+                "ComponentInput",
+                0,
                 &format!("control.UnicastDHT INPUT target={target_addr}"),
-                &chain, "component.input",
+                &chain,
+                "component.input",
             );
-            if swarm_tx.send(SwarmControlCmd::UnicastDHT { target_addr: target_addr.clone() }).await.is_err() {
+            if swarm_tx
+                .send(SwarmControlCmd::UnicastDHT {
+                    target_addr: target_addr.clone(),
+                })
+                .await
+                .is_err()
+            {
                 push_packet_meta_trace(
-                    "ComponentError", 0,
+                    "ComponentError",
+                    0,
                     "control.UnicastDHT ERROR swarm loop disconnected",
-                    &chain, "component.error",
+                    &chain,
+                    "component.error",
                 );
-                return ControlResponse::Error { reason: "Swarm loop disconnected".into() };
+                return ControlResponse::Error {
+                    reason: "Swarm loop disconnected".into(),
+                };
             }
             push_packet_meta_trace(
-                "ComponentOutput", 0,
+                "ComponentOutput",
+                0,
                 &format!("control.UnicastDHT OUTPUT queued target={target_addr}"),
-                &chain, "component.output",
+                &chain,
+                "component.output",
             );
-            ControlResponse::Ok { msg: format!("UnicastDHT NodeAnnounce to {} queued", target_addr) }
+            ControlResponse::Ok {
+                msg: format!("UnicastDHT NodeAnnounce to {} queued", target_addr),
+            }
         }
-        ControlRequest::SendScale { chunk_count, chunk_size } => {
+        ControlRequest::SendScale {
+            chunk_count,
+            chunk_size,
+        } => {
             let chain = pre_chain.unwrap_or_else(|| next_chain(""));
             push_packet_meta_trace(
                 "ComponentInput",
@@ -417,7 +647,13 @@ async fn handle_request(
                 .await
             {
                 Ok(resp) => {
-                    if let ControlResponse::ScaleResult { acked, total, elapsed_ms, .. } = &resp {
+                    if let ControlResponse::ScaleResult {
+                        acked,
+                        total,
+                        elapsed_ms,
+                        ..
+                    } = &resp
+                    {
                         push_packet_meta_trace(
                             "ComponentOutput",
                             acked * chunk_size,
@@ -451,7 +687,10 @@ async fn handle_request(
             push_packet_meta_trace(
                 "ComponentInput",
                 size,
-                &format!("control.SendDummy INPUT size={} path={}", size, path_summary),
+                &format!(
+                    "control.SendDummy INPUT size={} path={}",
+                    size, path_summary
+                ),
                 &chain,
                 "component.input",
             );
@@ -496,7 +735,11 @@ async fn execute_send_dummy(
     push_packet_meta_trace(
         "ComponentInput",
         size,
-        &format!("execute_send_dummy INPUT size={} path={}", size, path.join("->")),
+        &format!(
+            "execute_send_dummy INPUT size={} path={}",
+            size,
+            path.join("->")
+        ),
         &chain,
         "component.input",
     );
@@ -509,10 +752,12 @@ async fn execute_send_dummy(
             &chain,
             "component.error",
         );
-        return Err(anyhow::anyhow!("Direct dummy send to publisher without circuit not currently implemented in this demo"));
+        return Err(anyhow::anyhow!(
+            "Direct dummy send to publisher without circuit not currently implemented in this demo"
+        ));
     }
 
-    // 1. Build circuit path from Local Seed Store
+    // 1. Build the user-provided explicit triplet from local seed store.
     chain = next_chain(&chain);
     push_packet_meta_trace(
         "ComponentInput",
@@ -521,13 +766,15 @@ async fn execute_send_dummy(
         &chain,
         "component.input",
     );
-    let mut explicit_route = Vec::new();
+    let mut explicit_triplet = Vec::new();
     {
         let store = seed_store.read().unwrap();
         for hop_str in &path {
-            let addr: SocketAddr = hop_str.parse().context(format!("Invalid SocketAddr: {hop_str}"))?;
+            let addr: SocketAddr = hop_str
+                .parse()
+                .context(format!("Invalid SocketAddr: {hop_str}"))?;
             if let Some(node) = store.get(&addr) {
-                if node.subnet_tag != "HostileSubnet" && node.subnet_tag != "FreeSubnet" {
+                if !is_relay_node(node) {
                     push_packet_meta_trace(
                         "ComponentError",
                         0,
@@ -544,7 +791,7 @@ async fn execute_send_dummy(
                         node.subnet_tag
                     );
                 }
-                explicit_route.push(node.clone());
+                explicit_triplet.push(node.clone());
             } else {
                 push_packet_meta_trace(
                     "ComponentError",
@@ -559,77 +806,40 @@ async fn execute_send_dummy(
     }
     push_packet_meta_trace(
         "ComponentOutput",
-        explicit_route.len(),
-        &format!("execute_send_dummy.lookup_seed_store OUTPUT hops={}", explicit_route.len()),
+        explicit_triplet.len(),
+        &format!(
+            "execute_send_dummy.lookup_seed_store OUTPUT hops={}",
+            explicit_triplet.len()
+        ),
         &chain,
         "component.output",
     );
 
-    if explicit_route.len() < 3 {
+    if explicit_triplet.len() < 3 {
         push_packet_meta_trace(
             "ComponentError",
-            explicit_route.len(),
+            explicit_triplet.len(),
             &format!(
                 "execute_send_dummy ERROR insufficient_hops={} (need>=3)",
-                explicit_route.len()
+                explicit_triplet.len()
             ),
             &chain,
             "component.error",
         );
-        anyhow::bail!("Circuit requires at least 3 hops (guard, middle, exit), got {}", explicit_route.len());
+        anyhow::bail!(
+            "Circuit requires at least 3 hops (guard, middle, exit), got {}",
+            explicit_triplet.len()
+        );
     }
 
-    // 2. Extract guard, middle, exit
-    let exit = explicit_route.pop().unwrap();
-    let middle = explicit_route.pop().unwrap();
-    let guard = explicit_route.pop().unwrap();
-
-    let cm = CircuitManager::new();
+    let exit = explicit_triplet.pop().unwrap();
+    let middle = explicit_triplet.pop().unwrap();
+    let guard = explicit_triplet.pop().unwrap();
+    let explicit_route = (guard, middle, exit);
 
     let (publisher_addr, publisher_pub_key) = crate::swarm::discover_publisher_static()
         .await
         .context("SendDummy: failed to discover Publisher static endpoint")?;
-
-    // 3. Build circuit
-    chain = next_chain(&chain);
-    push_packet_meta_trace(
-        "ComponentInput",
-        0,
-        &format!(
-            "circuit_manager.build_circuit INPUT guard={} middle={} exit={}",
-            guard.addr, middle.addr, exit.addr
-        ),
-        &chain,
-        "component.input",
-    );
-    info!("SendDummy: Building explicit circuit guard={}, middle={}, exit={}", guard.addr, middle.addr, exit.addr);
-    let circuit = crate::circuit_manager::build_circuit(
-        &noise_priv_key,
-        &guard,
-        &middle,
-        &exit,
-        publisher_addr,
-        publisher_pub_key,
-        &chain,
-    ).await.map_err(|e| {
-        push_packet_meta_trace(
-            "ComponentError",
-            0,
-            &format!("circuit_manager.build_circuit ERROR err={e:#}"),
-            &chain,
-            "component.error",
-        );
-        e
-    })?;
-    push_packet_meta_trace(
-        "ComponentOutput",
-        0,
-        "circuit_manager.build_circuit OUTPUT ok",
-        &chain,
-        "component.output",
-    );
-    
-    cm.add_circuit(circuit).await;
 
     let dummy_payload = vec![0x42u8; size]; // "B"s
     let total_chunks = dummy_payload.len().div_ceil(SEND_DUMMY_FRAGMENT_SIZE) as u32;
@@ -646,28 +856,24 @@ async fn execute_send_dummy(
         "component.input",
     );
 
-    for (chunk_index, fragment) in dummy_payload
-        .chunks(SEND_DUMMY_FRAGMENT_SIZE)
-        .enumerate()
-    {
-        cm.send_chunk_with_meta(
+    for (chunk_index, fragment) in dummy_payload.chunks(SEND_DUMMY_FRAGMENT_SIZE).enumerate() {
+        send_chunk_with_retries(
+            &noise_priv_key,
+            seed_store,
+            Some(&explicit_route),
+            publisher_addr,
+            publisher_pub_key,
+            transfer_chain.clone(),
             transfer_chunk_id,
             chunk_index as u32,
             total_chunks,
-            Some(&transfer_chain),
             fragment.to_vec(),
         )
         .await
         .with_context(|| {
             format!(
-                "SendDummy send_chunk failed guard={} middle={} exit={} size={} chunk_index={} total_chunks={} chunk_id={}",
-                guard.addr,
-                middle.addr,
-                exit.addr,
-                size,
-                chunk_index,
-                total_chunks,
-                transfer_chunk_id
+                "SendDummy send_chunk failed size={} chunk_index={} total_chunks={} chunk_id={}",
+                size, chunk_index, total_chunks, transfer_chunk_id
             )
         })
         .map_err(|e| {
@@ -676,15 +882,26 @@ async fn execute_send_dummy(
                 fragment.len(),
                 &format!(
                     "circuit_manager.send_chunk ERROR chunk_id={} chunk_index={} total_chunks={} err={e:#}",
-                    transfer_chunk_id,
-                    chunk_index,
-                    total_chunks
+                    transfer_chunk_id, chunk_index, total_chunks
                 ),
                 &transfer_chain,
                 "component.error",
             );
             e
         })?;
+        push_packet_meta_trace(
+            "ComponentOutput",
+            fragment.len(),
+            &format!(
+                "circuit_manager.send_chunk OUTPUT sent_bytes={} chunk_id={} chunk_index={} total_chunks={}",
+                fragment.len(),
+                transfer_chunk_id,
+                chunk_index,
+                total_chunks
+            ),
+            &transfer_chain,
+            "component.output",
+        );
     }
     push_packet_meta_trace(
         "ComponentOutput",
@@ -717,6 +934,139 @@ async fn execute_send_dummy(
     ))
 }
 
+async fn send_chunk_with_retries(
+    noise_priv_key: &[u8; 32],
+    seed_store: &Arc<RwLock<HashMap<SocketAddr, RelayNode>>>,
+    explicit_path: Option<&(RelayNode, RelayNode, RelayNode)>,
+    publisher_addr: SocketAddr,
+    publisher_pub_key: [u8; 32],
+    transfer_chain: String,
+    chunk_id: u64,
+    chunk_index: u32,
+    total_chunks: u32,
+    fragment: Vec<u8>,
+) -> Result<()> {
+    if explicit_path.is_none() {
+        anyhow::bail!("SendDummy retry logic requires an explicit first path");
+    }
+
+    let mut attempts = 0usize;
+    let mut attempted = HashSet::new();
+    let explicit = explicit_path.cloned();
+    let mut last_error: Option<String> = None;
+
+    while attempts < SEND_DUMMY_MAX_ATTEMPTS {
+        let chain_attempt = next_chain(&transfer_chain);
+        let peers = live_relay_nodes(seed_store);
+        if peers.is_empty() {
+            anyhow::bail!("No relay peers found in local DHT seed store");
+        }
+
+        let candidate_paths = build_candidate_paths(explicit.clone(), &peers);
+        if candidate_paths.is_empty() {
+            anyhow::bail!("No valid relay triplets available in local DHT");
+        }
+
+        let mut selected: Option<(RelayNode, RelayNode, RelayNode)> = None;
+        for path in &candidate_paths {
+            if !attempted.contains(&path_key(&path.0, &path.1, &path.2)) {
+                selected = Some(path.clone());
+                break;
+            }
+        }
+        let used_recycled = selected.is_none();
+        if selected.is_none() {
+            let reuse_idx = if candidate_paths.is_empty() {
+                0
+            } else {
+                attempts % candidate_paths.len()
+            };
+            selected = candidate_paths.get(reuse_idx).cloned();
+        }
+
+        let Some((guard, middle, exit)) = selected else {
+            anyhow::bail!("Unable to select relay path");
+        };
+
+        let new_key = path_key(&guard, &middle, &exit);
+        if !used_recycled {
+            attempted.insert(new_key);
+        }
+
+        attempts += 1;
+        let path = format!(
+            "guard={} middle={} exit={}",
+            guard.addr, middle.addr, exit.addr
+        );
+        push_packet_meta_trace(
+            "ChunkRouteSelected",
+            0,
+            &format!(
+                "execute_send_dummy.route attempt={} path={} recycled={}",
+                attempts, path, used_recycled
+            ),
+            &chain_attempt,
+            "circuit.route",
+        );
+
+        let chunk_result = crate::circuit_manager::send_chunk_via_path(
+            noise_priv_key,
+            &guard,
+            &middle,
+            &exit,
+            publisher_addr,
+            publisher_pub_key,
+            chunk_id,
+            chunk_index,
+            total_chunks,
+            Some(&transfer_chain),
+            fragment.clone(),
+        )
+        .await;
+
+        if let Err(error) = chunk_result {
+            #[cfg(feature = "dht-validation-policy")]
+        apply_node_path_result(seed_store, &[guard.addr, middle.addr, exit.addr], false);
+            last_error = Some(error.to_string());
+            push_packet_meta_trace(
+                "ComponentError",
+                fragment.len(),
+                &format!(
+                    "circuit_manager.send_chunk ERROR attempt={} path={} guard={} middle={} exit={} err={error:#}",
+                    attempts, path, guard.addr, middle.addr, exit.addr
+                ),
+                &chain_attempt,
+                "circuit.error",
+            );
+            continue;
+        }
+
+        #[cfg(feature = "dht-validation-policy")]
+        apply_node_path_result(seed_store, &[guard.addr, middle.addr, exit.addr], true);
+        push_packet_meta_trace(
+            "ComponentOutput",
+            fragment.len(),
+            &format!(
+                "circuit_manager.send_chunk OUTPUT sent_bytes={} chunk_id={} chunk_index={} total_chunks={} attempt={}",
+                fragment.len(),
+                chunk_id,
+                chunk_index,
+                total_chunks,
+                attempts
+            ),
+            &chain_attempt,
+            "circuit.send",
+        );
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "Failed to send chunk after {} attempts: {}",
+        attempts,
+        last_error.unwrap_or_else(|| "unknown error".to_string())
+    )
+}
+
 async fn execute_send_scale(
     chunk_count: usize,
     chunk_size: usize,
@@ -728,7 +1078,18 @@ async fn execute_send_scale(
 
     let all_peers: Vec<RelayNode> = {
         let store = seed_store.read().unwrap();
-        store.values().cloned().collect()
+        #[cfg(feature = "dht-validation-policy")]
+        {
+            store
+                .values()
+                .filter(|node| node.validation_state != ValidationState::Isolated)
+                .cloned()
+                .collect()
+        }
+        #[cfg(not(feature = "dht-validation-policy"))]
+        {
+            store.values().cloned().collect()
+        }
     };
 
     if all_peers.is_empty() {
@@ -763,6 +1124,33 @@ async fn execute_send_scale(
 
     let total = outcomes.len();
     let acked = outcomes.iter().filter(|o| o.acked).count();
+
+    #[cfg(feature = "dht-validation-policy")]
+    for outcome in &outcomes {
+        let middle_is_unvalidated = seed_store
+            .read()
+            .unwrap()
+            .get(&outcome.middle_addr)
+            .map(|node| node.validation_state == ValidationState::Unvalidated)
+            .unwrap_or(false);
+        let shared_pair_validated_elsewhere = outcomes.iter().any(|other| {
+            other.chunk_index != outcome.chunk_index
+                && other.guard_addr == outcome.guard_addr
+                && other.exit_addr == outcome.exit_addr
+                && other.middle_addr != outcome.middle_addr
+                && other.acked
+        });
+
+        if !outcome.acked && middle_is_unvalidated && shared_pair_validated_elsewhere {
+            apply_node_path_result(seed_store, &[outcome.middle_addr], false);
+        } else {
+            apply_node_path_result(
+                seed_store,
+                &[outcome.guard_addr, outcome.middle_addr, outcome.exit_addr],
+                outcome.acked,
+            );
+        }
+    }
 
     let chunks: Vec<ScaleChunkResult> = outcomes
         .into_iter()
