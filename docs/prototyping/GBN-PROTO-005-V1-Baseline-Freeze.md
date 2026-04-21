@@ -10,7 +10,7 @@ release_tag: gbn-proto-005-phase0-v1-baseline
 
 - Project: `Veritas`
 - Baseline mode: `V1 onion mode`
-- Release title: `GBN-PROTO-005 Phase 0 - V1 Baseline Freeze`
+- Release title: `GBN-PROTO-005 Phase 0 — V1 Baseline Freeze`
 - Baseline code commit meaning: last approved V1 implementation commit before the Phase 0 release packaging docs
 
 ## 2. Protected V1 Paths
