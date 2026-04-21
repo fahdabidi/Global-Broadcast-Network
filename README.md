@@ -284,7 +284,7 @@ This keeps redundant traffic low under normal conditions while still repairing m
   a discovered node is trusted for routing or for propagating more DHT entries.
 ~~~
 
-**How the DHT is populated now:**
+**How the DHT is populated now (Lattice):**
 
 1. A live node periodically broadcasts NodeAnnounce through PlumTree.
 2. When two peers connect directly, they exchange DirectNodeAnnounce.
@@ -299,7 +299,7 @@ This keeps redundant traffic low under normal conditions while still repairing m
    - `direct` peers receive a minimal bootstrap DHT (default middle + default exit) to help them progress
    - `unvalidated` and `propagated_only` peers receive no `DirectNodePropagate`; they must bootstrap via the direct probe chain first
 
-**How the Creator uses the gossip DHT:**
+**How the Creator uses the gossip DHT (Lattice):**
 
 ~~~text
 GOSSIP DESCRIPTOR (advertised in DHT / signed metadata)
@@ -363,7 +363,7 @@ LOCAL SEED STORE ENTRY (runtime DHT table used by Creator/relays)
 ~~~
 
 ~~~text
-VALIDATION STATE MACHINE
+VALIDATION STATE MACHINE (Lattice)
 
 propagated_only
   Learned indirectly through DHT propagation.
@@ -438,7 +438,7 @@ The Creator still builds the onion circuit from local DHT state, but it now excl
 
 ---
 
-### What each participant can observe
+### What each participant can observe (Lattice)
 
 ```text
 Creator      -> Sees: local video + target Publisher key
