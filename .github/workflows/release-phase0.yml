@@ -1,0 +1,389 @@
+name: Release Phase 0 V1 Baseline
+
+run-name: Phase 0 baseline release (${{ inputs.release_tag }})${{ inputs.publish_release && ' [publish]' || ' [dry-run]' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: Branch or commit to freeze. Must resolve to a commit on origin/main.
+        required: true
+        default: main
+        type: string
+      release_tag:
+        description: Annotated git tag to create for the frozen baseline release.
+        required: true
+        default: gbn-proto-005-phase0-v1-baseline
+        type: string
+      release_title:
+        description: GitHub release title.
+        required: true
+        default: GBN-PROTO-005 Phase 0 - V1 Baseline Freeze
+        type: string
+      publish_release:
+        description: When false, run validation and generate notes only. When true, also push the tag and publish the GitHub release.
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-phase0-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate Phase 0 Baseline
+    runs-on: ubuntu-latest
+    outputs:
+      target_sha: ${{ steps.collect.outputs.target_sha }}
+      baseline_branch: ${{ steps.collect.outputs.baseline_branch }}
+      release_notes_path: ${{ steps.notes.outputs.release_notes_path }}
+    steps:
+      - name: Checkout target ref
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.target_ref }}
+
+      - name: Prepare validation workspace
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/phase0-validation"
+
+      - name: Validate release inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${{ inputs.release_tag }}" =~ ^gbn-proto-005-phase0-v1-baseline(-r[0-9]+)?$ ]]; then
+            echo "Release tag '${{ inputs.release_tag }}' does not match the approved Phase 0 pattern." >&2
+            exit 1
+          fi
+
+          if [[ -z "${{ inputs.release_title }}" ]]; then
+            echo "Release title must not be empty." >&2
+            exit 1
+          fi
+
+      - name: Collect git metadata
+        id: collect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch origin main --tags --force
+
+          target_sha="$(git rev-parse HEAD)"
+          if ! git merge-base --is-ancestor "$target_sha" origin/main; then
+            echo "Target commit $target_sha is not reachable from origin/main." >&2
+            exit 1
+          fi
+
+          {
+            echo "target_sha=$target_sha"
+            echo "baseline_branch=main"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verify target commit does not modify protected V1 paths
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          diff_file="$RUNNER_TEMP/phase0-validation/protected-commit-diff.txt"
+          git show --format= --name-only --first-parent HEAD -- \
+            prototype/gbn-proto \
+            docs/prototyping/GBN-PROTO-004-Phase2-Serverless-Scale-Onion-Plan.md \
+            docs/prototyping/GBN-PROTO-004-Phase2-Serverless-Scale-Test.md \
+            docs/architecture/GBN-ARCH-000-System-Architecture.md \
+            docs/architecture/GBN-ARCH-001-Media-Creation-Network.md | tee "$diff_file"
+
+          if [[ -s "$diff_file" ]]; then
+            echo "Target commit modifies protected V1 paths and cannot be used for a Phase 0 release." >&2
+            exit 1
+          fi
+
+      - name: Verify Phase 0 documents exist
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f docs/prototyping/GBN-PROTO-005-V1-Baseline-Freeze.md
+          test -f docs/prototyping/GBN-PROTO-005-V1-Regression-Suite.md
+
+      - name: Verify Phase 0 documents contain release identifiers
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          target_sha="${{ steps.collect.outputs.target_sha }}"
+          release_tag="${{ inputs.release_tag }}"
+
+          grep -Fq "$target_sha" docs/prototyping/GBN-PROTO-005-V1-Baseline-Freeze.md
+          grep -Fq "$release_tag" docs/prototyping/GBN-PROTO-005-V1-Baseline-Freeze.md
+          grep -Fq "cargo check --workspace" docs/prototyping/GBN-PROTO-005-V1-Regression-Suite.md
+          grep -Fq "cargo test -p mcn-router-sim" docs/prototyping/GBN-PROTO-005-V1-Regression-Suite.md
+
+      - name: Verify release tag does not already exist remotely
+        if: ${{ inputs.publish_release }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${{ inputs.release_tag }}" >/dev/null 2>&1; then
+            echo "Release tag '${{ inputs.release_tag }}' already exists on origin." >&2
+            exit 1
+          fi
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            prototype/gbn-proto -> target
+
+      - name: V1 file integrity check before tests
+        id: protected_before
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          diff_file="$RUNNER_TEMP/phase0-validation/protected-diff-before.txt"
+          git diff --name-only -- \
+            prototype/gbn-proto \
+            docs/prototyping/GBN-PROTO-004-Phase2-Serverless-Scale-Onion-Plan.md \
+            docs/prototyping/GBN-PROTO-004-Phase2-Serverless-Scale-Test.md \
+            docs/architecture/GBN-ARCH-000-System-Architecture.md \
+            docs/architecture/GBN-ARCH-001-Media-Creation-Network.md | tee "$diff_file"
+
+          if [[ -s "$diff_file" ]]; then
+            echo "Protected path diff is not clean before validation." >&2
+            exit 1
+          fi
+
+      - name: cargo check --workspace
+        id: cargo_check
+        continue-on-error: true
+        working-directory: prototype/gbn-proto
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check --workspace 2>&1 | tee "$RUNNER_TEMP/phase0-validation/cargo-check.log"
+
+      - name: cargo test -p mcn-router-sim
+        id: cargo_test
+        if: ${{ always() && steps.cargo_check.outcome == 'success' }}
+        continue-on-error: true
+        working-directory: prototype/gbn-proto
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p mcn-router-sim 2>&1 | tee "$RUNNER_TEMP/phase0-validation/cargo-test.log"
+
+      - name: V1 file integrity check after tests
+        id: protected_after
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          diff_file="$RUNNER_TEMP/phase0-validation/protected-diff-after.txt"
+          git diff --name-only -- \
+            prototype/gbn-proto \
+            docs/prototyping/GBN-PROTO-004-Phase2-Serverless-Scale-Onion-Plan.md \
+            docs/prototyping/GBN-PROTO-004-Phase2-Serverless-Scale-Test.md \
+            docs/architecture/GBN-ARCH-000-System-Architecture.md \
+            docs/architecture/GBN-ARCH-001-Media-Creation-Network.md | tee "$diff_file"
+
+          if [[ -s "$diff_file" ]]; then
+            echo "Protected path diff is not clean after validation." >&2
+            exit 1
+          fi
+
+      - name: Verify repository remains clean
+        id: repo_clean
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git status --short | tee "$RUNNER_TEMP/phase0-validation/git-status.txt"
+          if [[ -s "$RUNNER_TEMP/phase0-validation/git-status.txt" ]]; then
+            echo "Repository is not clean after validation." >&2
+            exit 1
+          fi
+
+      - name: Generate release notes
+        id: notes
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          notes_path="$RUNNER_TEMP/phase0-validation/release-notes.md"
+          target_sha="${{ steps.collect.outputs.target_sha }}"
+          baseline_branch="${{ steps.collect.outputs.baseline_branch }}"
+          repo_url="https://github.com/${GITHUB_REPOSITORY}"
+
+          cargo_check_result="FAIL"
+          if [[ "${{ steps.cargo_check.outcome }}" == "success" ]]; then
+            cargo_check_result="PASS"
+          fi
+
+          cargo_test_result="SKIPPED"
+          if [[ "${{ steps.cargo_test.outcome }}" == "success" ]]; then
+            cargo_test_result="PASS"
+          elif [[ "${{ steps.cargo_test.outcome }}" == "failure" ]]; then
+            cargo_test_result="FAIL"
+          fi
+
+          integrity_result="PASS"
+          if [[ "${{ steps.protected_after.outcome }}" != "success" ]]; then
+            integrity_result="FAIL"
+          fi
+
+          cat > "$notes_path" <<EOF
+          ## Summary
+          Freezes the V1 onion-mode baseline that GBN-PROTO-005 Phase 2 V2 work must preserve.
+
+          ## Baseline
+          - Branch: ${baseline_branch}
+          - Commit: ${target_sha}
+          - Tag: ${{ inputs.release_tag }}
+          - Workflow mode: ${{ inputs.publish_release && 'publish' || 'dry-run' }}
+
+          ## Protected V1 Scope
+          - No-touch paths: [GBN-PROTO-005-V1-Baseline-Freeze.md](${repo_url}/blob/${target_sha}/docs/prototyping/GBN-PROTO-005-V1-Baseline-Freeze.md)
+          - Required regression suites: [GBN-PROTO-005-V1-Regression-Suite.md](${repo_url}/blob/${target_sha}/docs/prototyping/GBN-PROTO-005-V1-Regression-Suite.md)
+
+          ## Validation
+          - V1 file integrity check: ${integrity_result}
+          - cargo check --workspace: ${cargo_check_result}
+          - cargo test -p mcn-router-sim: ${cargo_test_result}
+
+          ## Approval Gate
+          Phase 1 must not begin until this baseline freeze is approved.
+          EOF
+
+          echo "release_notes_path=$notes_path" >> "$GITHUB_OUTPUT"
+
+      - name: Upload validation artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase0-validation-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase0-validation
+          if-no-files-found: warn
+
+      - name: Enforce validation success
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ steps.cargo_check.outcome }}" != "success" ]]; then
+            echo "cargo check --workspace failed." >&2
+            exit 1
+          fi
+
+          if [[ "${{ steps.cargo_test.outcome }}" != "success" ]]; then
+            echo "cargo test -p mcn-router-sim failed or was skipped." >&2
+            exit 1
+          fi
+
+          if [[ "${{ steps.protected_after.outcome }}" != "success" ]]; then
+            echo "Protected path diff failed after validation." >&2
+            exit 1
+          fi
+
+          if [[ "${{ steps.repo_clean.outcome }}" != "success" ]]; then
+            echo "Repository cleanliness check failed after validation." >&2
+            exit 1
+          fi
+
+      - name: Write workflow summary
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          {
+            echo "## Phase 0 Validation"
+            echo
+            echo "- Target ref: \`${{ inputs.target_ref }}\`"
+            echo "- Target SHA: \`${{ steps.collect.outputs.target_sha }}\`"
+            echo "- Release tag: \`${{ inputs.release_tag }}\`"
+            echo "- Publish release: \`${{ inputs.publish_release }}\`"
+            echo "- Validation artifact: \`phase0-validation-${{ github.run_id }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Publish Phase 0 Release
+    runs-on: ubuntu-latest
+    needs: validate
+    if: ${{ needs.validate.result == 'success' && inputs.publish_release }}
+    steps:
+      - name: Checkout target SHA
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.validate.outputs.target_sha }}
+
+      - name: Download validation artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: phase0-validation-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase0-validation
+
+      - name: Verify release tag is still available
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${{ inputs.release_tag }}" >/dev/null 2>&1; then
+            echo "Release tag '${{ inputs.release_tag }}' already exists on origin." >&2
+            exit 1
+          fi
+
+      - name: Create and push annotated tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git tag -a "${{ inputs.release_tag }}" "${{ needs.validate.outputs.target_sha }}" -m "${{ inputs.release_title }}"
+          git push origin "refs/tags/${{ inputs.release_tag }}"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          notes_path="$RUNNER_TEMP/phase0-validation/release-notes.md"
+          gh release create "${{ inputs.release_tag }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${{ needs.validate.outputs.target_sha }}" \
+            --title "${{ inputs.release_title }}" \
+            --notes-file "$notes_path"
+
+      - name: Write publish summary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_url="$(gh release view "${{ inputs.release_tag }}" --repo "${GITHUB_REPOSITORY}" --json url --jq '.url')"
+          {
+            echo "## Phase 0 Release Published"
+            echo
+            echo "- Tag: \`${{ inputs.release_tag }}\`"
+            echo "- Release: ${release_url}"
+            echo "- Target SHA: \`${{ needs.validate.outputs.target_sha }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

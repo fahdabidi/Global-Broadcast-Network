@@ -349,6 +349,8 @@ Resources:
             -e GBN_INSTANCE_IPV4=10.0.1.10 \
             -e GBN_SUBNET_TAG=HostileSubnet \
             -e GBN_NOISE_PRIVKEY_HEX=${SeedRelayNoisePrivKey} \
+            -e GBN_PUBLISHER_IP=10.0.3.10 \
+            -e GBN_PUBLISHER_PUBKEY_HEX=${PublisherPubKeyHex} \
             -e RUST_LOG=info \
             "$IMAGE_URI"
           EOF

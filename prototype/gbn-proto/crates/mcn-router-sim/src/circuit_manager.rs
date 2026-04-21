@@ -241,10 +241,21 @@ fn relay_to_hop(node: &RelayNode) -> HopInfo {
 }
 
 fn creator_ack_addr_from_env() -> SocketAddr {
-    std::env::var("GBN_CREATOR_ACK_ADDR")
+    if let Some(addr) = std::env::var("GBN_CREATOR_ACK_ADDR")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))
+    {
+        return addr;
+    }
+    let ip: IpAddr = std::env::var("GBN_INSTANCE_IPV4")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| Ipv4Addr::UNSPECIFIED.into());
+    let port: u16 = std::env::var("GBN_ONION_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(9001);
+    SocketAddr::new(ip, port)
 }
 
 fn now_millis() -> u64 {

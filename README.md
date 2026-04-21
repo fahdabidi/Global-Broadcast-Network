@@ -12,7 +12,7 @@
 This repository is an **active prototype** (`gbn-proto`) for validating core architecture and security assumptions.
 
 - Core Rust workspace and crate boundaries are in place
-- Integration test scaffolding exists for metadata stripping, multipath reassembly, tamper detection, and end-to-end pipeline tests
+- Integration test scaffolding exists for metadata stripping, multipath reassembly, tamper detection, end-to-end pipeline, DHT validation, gossip smoke, active heartbeat disconnect, and telescopic sinkhole resilience tests
 - CLI orchestration commands are partially implemented (see `crates/proto-cli/src/main.rs`)
 - Not production-ready; APIs and protocols are expected to evolve during prototyping
 
@@ -149,30 +149,37 @@ The **Global Broadcast Network** aims to provide a complete, end-to-end pipeline
 
 The path is created by the creator from its DHT which has been populated by the gossip network
 
-**Onion build (Creator, innermost first):**
+**Onion build (Creator, routing layers nested innermost-first, payload sealed separately):**
 
 ```
-layer_pub  = seal(publisher_pub,  { next_hop: None,chunk_payload, chunk_id, chunk_hash, return_path, send_timestamp, total_chunks, chunk_index })
-layer_exit = seal(exit_pub,       { next_hop: publisher_addr}) + layer_pub 
-layer_mid  = seal(middle_pub,     { next_hop: exit_addr}) + layer_pub 
-layer_grd  = seal(guard_pub,      { next_hop: middle_addr}) + layer_pub 
+payload     = seal(publisher_pub, { chunk_id, hash, chunk, return_path, send_timestamp_ms, total_chunks, chunk_index })
+route_exit  = seal(exit_pub,   { next_hop: publisher_addr, inner: [] })
+route_mid   = seal(middle_pub, { next_hop: exit_addr,      inner: route_exit })
+route_grd   = seal(guard_pub,  { next_hop: middle_addr,    inner: route_mid })
+
+// Wire frame sent to Guard over TCP:
+[ u32_be len(route_grd) ][ route_grd ][ payload ]
 ```
 
-Creator sends `layer_grd` over TCP to Guard.
+`return_path` is a `Vec<HopInfo>` = `[creator, guard, middle, exit, publisher]`, each with `addr` and noise `identity_pub`. The creator entry carries the node's own address and pubkey so Publisher can seal the ACK's innermost layer for it.
 
-**Each relay (Guard / Middle / Exit):**
-1. Read length-prefixed bytes from TCP
-2. `open(own_priv)` → `{ next_hop}`
-3. Connect to `next_hop`, write `layer_pub` as length-prefixed bytes
-4. (No response needed for data forwarding)
+**Each relay (Guard / Middle):**
+1. Read compound frame `[u32_be routing_len][routing_sealed][payload_sealed]` from upstream TCP
+2. `open(own_priv, routing_sealed)` → `{ next_hop, inner: next_routing }`
+3. Connect to `next_hop`, write `[u32_be len(inner)][inner][payload_sealed]` as a length-prefixed frame
+4. Read ACK frame from downstream; peel one ACK layer with own key; relay inner ACK back upstream
+
+**Exit relay:**
+- Same as above except `inner` is empty: forwards just `[payload_sealed]` (raw length-prefixed frame) to Publisher
 
 **Publisher:**
-1. `open(layer_pub)` → `{ next_hop: None,chunk_payload, chunk_id, chunk_hash, return_path, send_timestamp, total_chunks, chunk_index }`
-2. Verify hash, store chunk
-3. Build reverse-direction ACK (ChunkID, Receive Timestamp, Hash, ChunkIndex) onion using `return_path` → send back to Creator
+1. `open(own_priv, payload_sealed)` → `{ chunk_id, hash, chunk, return_path, ... }`
+2. Verify BLAKE3 hash, store chunk
+3. Build reverse ACK onion from `return_path` (outermost = exit layer, innermost = creator layer)
+4. Write ACK onion back to Exit on the same TCP stream
 
-**ACK return path**: Publisher → Exit → Middle → Guard → Creator
-Creator must listen on an ACK port; return_path contains Creator's ack address.
+**ACK return path**: Publisher → Exit → Middle → Guard → Creator (each relay peels one ACK layer, relays inner to upstream)
+ACK flows back on the same persistent TCP connections; no separate listener is needed at the Creator.
 
 ---
 
@@ -243,15 +250,16 @@ This keeps redundant traffic low under normal conditions while still repairing m
 
 1. A live node periodically broadcasts NodeAnnounce through PlumTree.
 2. When two peers connect directly, they exchange DirectNodeAnnounce.
-3. Every 10 seconds, a node sends a sampled DirectNodePropagate batch from its local DHT to a sampled subset of neighbors.
+3. Every 10 seconds (configurable via `GBN_NODE_PROPAGATE_INTERVAL_SECS`), a node sends a sampled DirectNodePropagate batch from its local DHT to a random percentage of `direct` and `complete` neighbors only.
 4. A node learned only through propagation is queued for DirectNodeProbe.
 5. A successful direct probe response inserts the node as a direct sighting with `validation_state=unvalidated` and `validation_score=max(score,10)`.
 6. Newly direct-but-unvalidated nodes are queued for an automatic bootstrap validation send: a random-length dummy chunk is sent to the Publisher using the new node as Guard plus default Middle and Exit nodes chosen from the highest-ranked eligible relays in the local DHT.
 7. A valid Publisher ACK promotes that new Guard into `direct` through the normal scoring path.
-8. `DirectNodePropagate` updates are accepted from nodes whose `validation_state` is `direct` or `complete`.
+8. `DirectNodePropagate` updates are accepted from nodes whose `validation_state` is `unvalidated`, `direct`, or `complete`.
 9. Outbound propagation is target-aware:
    - `complete` peers receive a full ranked DHT slice
-   - non-complete peers receive only a minimal bootstrap DHT containing the designated Middle and Exit relays they need to start participating
+   - `direct` peers receive a minimal bootstrap DHT (default middle + default exit) to help them progress
+   - `unvalidated` and `propagated_only` peers receive no `DirectNodePropagate`; they must bootstrap via the direct probe chain first
 
 **How the Creator uses the gossip DHT:**
 
@@ -385,7 +393,7 @@ When a Creator wants to send, it queries its local in-memory DHT and filters can
   guard = the node under validation
   middle = highest-ranked eligible middle relay in the local DHT
   exit = highest-ranked eligible `FreeSubnet` relay in the local DHT
-- if the Publisher ACK returns successfully, the guard gains score and promotes into `direct`.
+- if the Publisher ACK returns successfully, the guard, middle, and exit all gain a validation score point; the guard promotes into `direct`.
 - once the node's score exceeds 20, it becomes `complete`.
 
 The Creator still builds the onion circuit from local DHT state, but it now excludes only `isolated` and `propagated_only` nodes, then prefers stronger validation evidence in this order: `complete > direct > unvalidated`.
@@ -437,7 +445,7 @@ Both prototype Dockerfiles currently compile the same binary:
 cargo build --release --bin gbn-proto --features distributed-trace
 ```
 
-That means both images currently link the full workspace transitively through `proto-cli`.
+The `dht-validation-policy` feature (gossip tiering, bootstrap validation, DHT state machine) is also active in deployed images — it is listed in the `default` features of `mcn-router-sim` and enabled automatically when the workspace is built. Both images link the full workspace transitively through `proto-cli`.
 
 | Component | `gbn-relay` image | `gbn-publisher` image | Notes |
 |---|---|---|---|
@@ -558,7 +566,7 @@ All system-level docs live under [`../../docs/`](../../docs/):
 
 ---
 
-## AWS Prototype Scripts
+## AWS Test Setup and Prototype Scripts
 
 The main AWS bring-up flow for the current phase prototype is:
 
@@ -582,6 +590,78 @@ aws sts get-caller-identity
 
 If those commands do not work, do not proceed with the deploy scripts yet. Fix AWS CLI installation and complete your AWS sign-in / credential setup first.
 
+### AWS Test Infrastructure Setup
+
+Running `deploy-scale-test.sh` lays down a single VPC partitioned into two subnets (`HostileSubnet` in AZ-0, `FreeSubnet` in AZ-1) and launches the prototype roles across Fargate and static EC2. Creator and hostile relay tasks run in the hostile subnet; free relay tasks and the Publisher EC2 live in the free subnet, simulating a geofence. The Publisher security group accepts onion ingress **only** from the free subnet, so the exit hop must be a `FreeSubnet` relay — this is what the creator's path selector enforces at the application layer.
+
+```
+  OPERATOR (WSL Ubuntu)                                             AWS ACCOUNT / REGION
+  +---------------------+                                     +--------------------------------+
+  | build-and-push.sh   |-- docker push gbn-relay:latest ---->|  ECR: gbn-relay, gbn-publisher |
+  | deploy-scale-test.sh|-- cfn deploy + aws ecs update ----->|  CloudFormation: phase1 stack  |
+  +---------------------+                                     +---------------+----------------+
+                                                                              |
+                                                                              v
+ +---------------------------------------- VPC (10.x/16) ----------------------------------------+
+ |                                                                                               |
+ |  +------------------ HostileSubnet (AZ-0) ------------------+  +----- FreeSubnet (AZ-1) -----+|
+ |  |                                                          |  |                             ||
+ |  |  +-----------------+   +------------------------------+  |  |  +----------------------+   ||
+ |  |  | SeedRelayInst.  |   | ECS Fargate                  |  |  |  | ECS Fargate          |   ||
+ |  |  | (static EC2     |   |   HostileRelayService        |  |  |  |   FreeRelayService   |   ||
+ |  |  |  host-net,      |   |   desired = 90% of scale     |  |  |  |   desired = 10% of   |   ||
+ |  |  |  docker pull    |   |                              |  |  |  |   scale              |   ||
+ |  |  |  :latest)       |   | ECS Fargate                  |  |  |  |                      |   ||
+ |  |  |  SG: RelaySG    |   |   CreatorService             |  |  |  |  SG: RelaySG         |   ||
+ |  |  +--------+--------+   |   desired = 1                |  |  |  +----------+-----------+   ||
+ |  |           |            |   SG: RelaySG                |  |  |             |               ||
+ |  |           |            +--------------+---------------+  |  |             |               ||
+ |  |           |                           |                  |  |             |               ||
+ |  |           +---------- east-west onion traffic -----------+--+-------------+               ||
+ |  |                       (RelaySG allows intra-VPC 9001/tcp)  |                               ||
+ |  |                                                            |  +----------------------+   ||
+ |  |                                                            |  | PublisherInstance    |   ||
+ |  |                                                            |  | (static EC2          |   ||
+ |  |                                                            |  |  host-net)           |   ||
+ |  |                                                            |  | SG: PublisherSG      |   ||
+ |  |                                                            |  | INGRESS only from    |   ||
+ |  |                                                            |  | FreeSubnet CIDR      |   ||
+ |  |                                                            |  +----------------------+   ||
+ |  +------------------------------------------------------------+  +-----------------------+   ||
+ |                                                                                              ||
+ |  IGW + public route table; AssignPublicIp=ENABLED on all Fargate tasks                       ||
+ +----------------------------------------------------------------------------------------------+|
+                                                                                                 |
+  +---------------------------+           +-----------------------------+                        |
+  | ChaosControllerLambda     |<--cron----| EventBridge: ChaosEngineRule|                        |
+  | (stops % of hostile/free  |           | (enabled only if ENABLE_    |                        |
+  |  tasks per tick)          |           |  CHAOS=1 at deploy time)    |                        |
+  +-----------+---------------+           +-----------------------------+                        |
+              |                                                                                  |
+              v                                                                                  |
+  +-----------------------------+        +----------------------------------+                    |
+  | CloudWatch: GBN/ScaleTest   |<-------| all task/EC2 roles emit metrics  |                    |
+  | (BootstrapResult, GossipBW, |        | dimensions: Scale, Subnet, NodeId|                    |
+  |  ChunksDelivered, ...)      |        +----------------------------------+                    |
+  +-----------------------------+                                                                 |
+                                                                                                  |
+  Operator access paths:                                                                          |
+    - ECS tasks  -> `aws ecs execute-command` (via `relay-control-interactive.sh`)                |
+    - Static EC2 -> AWS SSM Session Manager                                                       |
+```
+
+Deploy ordering (as enforced by `deploy-scale-test.sh`):
+
+1. Generate Publisher keypair + ephemeral SeedRelay Noise key (step 1/6).
+2. `aws cloudformation deploy` — creates VPC, subnets, SGs, IAM roles, ECR repos, both static EC2 instances, ECS cluster + task defs + services (services start at desired=0), Chaos Lambda + EventBridge rule (rule disabled by default) (step 2/6).
+3. Auto-run `build-and-push.sh` if the relay ECR repo is empty; otherwise static EC2 user-data would loop on `docker pull` (step 2.5/6).
+4. `restart-static-nodes.sh` — reboots SeedRelay + Publisher so they pull the freshly-pushed `:latest` image with host networking (step 3/7).
+5. Wait for `docker ps` on SeedRelay to report `gbn-seed-relay` before any ECS service is scaled (step 3.5/7) — this prevents the thundering-herd bootstrap failure observed in prior runs.
+6. Scale `HostileRelayService` / `FreeRelayService` / `CreatorService` to the seed topology (`SEED_PERCENT`, default 30%) (step 5/7).
+7. Stabilization Gate 1: wait until ≥90% of the seed tasks are `RUNNING` in ECS; `BootstrapResult` CloudWatch metric is queried every 30s as a diagnostic only, not a gate (step 6/7).
+8. Scale services to the full target split — 90% hostile / 10% free — unless `SMOKE_TOPOLOGY=1` (step 7/7).
+9. Configure and optionally enable the Chaos EventBridge rule after `CHAOS_ENABLE_DELAY_SECONDS` (step 8/8).
+
 ### Important scripts
 
 | Script | What it does | Main infrastructure touched |
@@ -590,6 +670,8 @@ If those commands do not work, do not proceed with the deploy scripts yet. Fix A
 | [`deploy-smoke-n5.sh`](/C:/Users/fahd_/OneDrive/Documents/Global%20Broadcast%20Network/prototype/gbn-proto/infra/scripts/deploy-smoke-n5.sh) | Thin wrapper around `deploy-scale-test.sh` that forces a 5-node smoke topology | Same phase stack, but runtime topology pinned to 2 hostile relays + 1 free relay + 1 creator + 1 static seed |
 | [`deploy-scale-test.sh`](/C:/Users/fahd_/OneDrive/Documents/Global%20Broadcast%20Network/prototype/gbn-proto/infra/scripts/deploy-scale-test.sh) | Deploys the Phase 1 scale stack, generates publisher/seed keys, optionally auto-builds images if ECR is empty, restarts static nodes, scales ECS services, and optionally enables chaos churn | CloudFormation stack, ECS cluster/services, ECR repos, static EC2 seed/publisher nodes, chaos Lambda and EventBridge rule |
 | [`relay-control-interactive.sh`](/C:/Users/fahd_/OneDrive/Documents/Global%20Broadcast%20Network/prototype/gbn-proto/infra/scripts/relay-control-interactive.sh) | Discovers live ECS and EC2 nodes and lets you run control-plane commands against them | ECS Exec against creator/relay tasks and SSM against seed/publisher EC2 nodes |
+| [`teardown-scale-test-safe.sh`](/C:/Users/fahd_/OneDrive/Documents/Global%20Broadcast%20Network/prototype/gbn-proto/infra/scripts/teardown-scale-test-safe.sh) | Safely tears down ECS services to zero, optionally deletes the CloudFormation stack, and scales down static nodes | ECS services, CloudFormation stack, static EC2 instances |
+| [`restart-static-nodes.sh`](/C:/Users/fahd_/OneDrive/Documents/Global%20Broadcast%20Network/prototype/gbn-proto/infra/scripts/restart-static-nodes.sh) | Restarts the SeedRelay and Publisher EC2 instances so they pull the current ECR image | Static EC2 seed relay and publisher instances |
 
 ### What the deploy scripts create
 
@@ -731,6 +813,7 @@ Important interactive commands:
 | `BroadcastSeed` | Force a seed-style gossip propagation event |
 | `UnicastDHT` | Trigger direct DHT exchange toward a chosen target |
 | `SendDummy` | Build a creator -> guard -> middle -> exit -> publisher path and send a dummy payload |
+| `LiveMetrics` | Stream live CloudWatch metrics for the active topology |
 | `Refresh nodes` | Re-scan the current live ECS/EC2 inventory |
 | `checkimages` | Verify image/runtime consistency on deployed nodes |
 
@@ -754,9 +837,42 @@ bash relay-control-interactive.sh \
   gbn-proto-phase1-scale-n100
 ```
 
-For teardown after a run, use the matching infra teardown scripts under `prototype/gbn-proto/infra/scripts/`.
+To tear down after a run:
+
+```bash
+bash teardown-scale-test-safe.sh gbn-proto-phase1-scale-n100 us-east-1
+```
 
 ---
+
+### 6. Security Gaps, Lessons Learned, and Architecture V2 Plan
+
+### Security Gaps & Lessons Learned
+
+The V1 onion prototype is functionally validated at N=5 but surfaces several structural gaps at N=100 that shape the V2 roadmap. See [GBN-ARCH-000 §9](docs/architecture/GBN-ARCH-000-System-Architecture.md) and [GBN-ARCH-001 §7](docs/architecture/GBN-ARCH-001-Media-Creation-Network.md) for the specced threat model; the items below are observed gaps against that design.
+
+- **Bringup brownout risk.** The network is vulnerable to brownout during cold-start. Nodes self-regulate (rate-limited probes, tiered gossip, score-based promotion) to damp the load, but the same knobs can be inverted by attackers injecting many "fake" low-score nodes to starve the validation queue. In our V1 network bootstraping we used a Single "Seed Relay" that was used to boot up and establish the network, this single seedrelay would get overwhelmed quickly when booting up even 70 ECS nodes.
+- **Mobile reachability mismatch.** V1 requires every relay to accept unsolicited inbound connections so peers can complete the `DirectNodeProbe → ProbeResponse` handshake. Real mobile carriers (CGNAT, default-deny inbound) break this assumption — the architecture silently degrades to "creator-only" participation for the majority of would-be phone nodes. This is the single largest deployment blocker and motivates V2 Architectures Bridge Mode.
+- **Trust-but-verify slows but doesn't prevent Sybil sinkholes.** Telescopic validation ([GBN-ARCH-001 §3.4](docs/architecture/GBN-ARCH-001-Media-Creation-Network.md)) and the `PropagatedOnly → Unvalidated → Direct → Complete` score ladder delay a malicious node from reaching routable state, but the DHT itself remains a topology oracle: a single compromised node learns its neighbors and can map regions of the overlay.
+- **Open-source fork attack surface.** Because the client is open source, adversaries can distribute modified binaries that (a) harvest neighbor identities to deanonymize users, (b) coordinate a triggered brownout / mass-sinkhole, or (c) cooperate with complicit carriers to shift IP ranges in lockstep and invalidate cached catalogs. Each of these requires cross-carrier coordination at geofence scale, so they are plausible attacks from state actors but unlikely from smaller adversaries.
+- **Attestation is available but not deployable.** Android AVF + DICE and iOS App Attest would bind node identity to a sealed binary and defeat the fork-distribution class of attack. Standard app-store distribution is incompatible with the app's policy profile, so attestation currently depends on sideload / enterprise distribution channels not yet implemented.
+- **Critical-mass bootstrapping problem.** Confident creator-identity protection needs ~10K+ concurrent and ~millions of total nodes per geofence. Below that threshold, traffic-correlation and timing attacks succeed cheaply, and a state actor can sinkhole the network before it achieves anonymity-set scale.
+- **Spec-vs-implementation drift.** Several mitigations from [GBN-ARCH-001 §7.2](docs/architecture/GBN-ARCH-001-Media-Creation-Network.md) remain design-only in the prototype: no cover traffic generator, no multi-circuit chunk dispersion per upload, no pluggable transports (obfs4 / WebTunnel), no visual anonymization (OpenCV / YOLO face+plate blur), no temporal jitter on circuit rebuilds. These are tracked as V2+ work and noted here to avoid confusion when reading the architecture docs.
+
+### Architecture V2 Plan — Next Milestone
+
+V2 is **additive, not a replacement** — V1 Onion Mode is preserved for anonymity-critical flows while V2 Bridge Mode targets mobile viability. Full specs: [GBN-ARCH-000-V2](docs/architecture/GBN-ARCH-000-System-Architecture-V2.md), [GBN-ARCH-001-V2](docs/architecture/GBN-ARCH-001-Media-Creation-Network-V2.md), execution plan in [GBN-PROTO-005](docs/prototyping/GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign.md).
+
+- **Single-hop bridge topology.** `Creator → ExitBridge → Publisher` replaces V1's `Guard → Middle → Exit` path for creator uploads, eliminating three-party path construction over unreliable mobile links ([§5 Network Topology](docs/architecture/GBN-ARCH-000-System-Architecture-V2.md#5-network-topology)).
+- **Publisher-Authorized Transport.** The Publisher becomes the authority that signs `BridgeDescriptor` leases and issues signed bridge catalogs; a node is transport-eligible only if it holds an unexpired Publisher signature ([§6 Identity and Authority](docs/architecture/GBN-ARCH-000-System-Architecture-V2.md#6-identity-and-authority-architecture)). This directly mitigates the Sybil / fork-distribution classes above — a malicious binary cannot self-promote into the exit set.
+- **Weak Discovery, Strong Authority.** DHT/gossip continues to *suggest* bridge candidates but no longer *authorizes* them; authority decisions move to signed catalogs. Compromised discovery nodes can waste dial budget but cannot insert themselves as exits ([§1.2 Core Principles](docs/architecture/GBN-ARCH-000-System-Architecture-V2.md#12-core-architectural-principles)).
+- **Reachability as first-class.** `BridgeDescriptor.reachability_class` (`direct` / `brokered` / `relay_only`) replaces the V1 assumption that every overlay node is inbound-dialable, closing the mobile-NAT gap called out above ([§4 Bridge Descriptor Model](docs/architecture/GBN-ARCH-001-Media-Creation-Network-V2.md#4-bridge-descriptor-model)).
+- **Creator only needs one reachable bridge.** Catalog-driven failover replaces path reconstruction: if a bridge fails the creator marks it suspect, selects the next cached signed descriptor, and resumes — no multi-hop rebuild, no DHT walk on the hot path ([§7 Failure And Recovery](docs/architecture/GBN-ARCH-001-Media-Creation-Network-V2.md#7-failure-and-recovery-model)).
+- **Lease-bound bridge lifetime.** Leases carry `lease_expiry_ms` with heartbeat renewal and explicit `BridgeRevoke`, giving the Publisher a fast kill switch for compromised bridges — a capability V1 lacks ([§5.1 Registration Messages](docs/architecture/GBN-ARCH-001-Media-Creation-Network-V2.md#51-registration-and-authority-messages)).
+- **Payload confidentiality preserved.** ExitBridges forward opaque creator-sealed payloads and cannot decrypt content; the trust reduction vs V1 is in *path anonymity* (single-hop sees the creator endpoint), not payload secrecy ([§8.1 Security Properties Preserved](docs/architecture/GBN-ARCH-000-System-Architecture-V2.md#81-security-properties-preserved)).
+- **Explicit anonymity trade-off.** Timing correlation and first-hop adjacency leak more than V1's 3-hop onion; V2 is positioned as a **mobile viability architecture**, not a full anonymity replacement ([§8 Security Architecture](docs/architecture/GBN-ARCH-000-System-Architecture-V2.md#8-security-architecture)).
+- **Workspace and infra isolation.** V2 ships in a separate crate tree (`prototype/gbn-bridge-proto/`) with independent image names, CloudFormation stacks, and metric namespace so it cannot destabilize the validated V1 deployment ([§7 Deployment Model](docs/architecture/GBN-ARCH-000-System-Architecture-V2.md#7-deployment-model)).
+- **Phased validation gate.** V2 must clear M3/M4 (catalog bootstrap, bridge failover, signed-descriptor enforcement, payload opacity) before any decision to promote Bridge Mode to the default creator transport ([§10 Migration Guidance](docs/architecture/GBN-ARCH-001-Media-Creation-Network-V2.md#10-migration-guidance)).
 
 ## Contributing (Prototype)
 
@@ -772,4 +888,4 @@ Suggested contribution flow:
 
 ## License
 
-This prototype workspace is currently licensed under **AGPL-3.0-or-later** (see workspace `Cargo.toml`).
+This prototype workspace is currently licensed under **Apache-2.0** (see workspace `Cargo.toml`).
