@@ -1,16 +1,17 @@
 use ed25519_dalek::SigningKey;
 use gbn_bridge_protocol::{
-    publisher_identity, BridgeCatalogRequest, BridgeCatalogResponse, BridgeHeartbeat, BridgeLease,
-    BridgeRegister, BridgeRevoke, CreatorJoinRequest, PublicKeyBytes, ReachabilityClass,
-    RevocationReason,
+    publisher_identity, BridgeAck, BridgeCatalogRequest, BridgeCatalogResponse, BridgeClose,
+    BridgeData, BridgeHeartbeat, BridgeLease, BridgeOpen, BridgeRegister, BridgeRevoke,
+    CreatorJoinRequest, PublicKeyBytes, ReachabilityClass, RevocationReason,
 };
 
 use crate::batching::{self, FinalizedBatch};
 use crate::bootstrap::{self, AuthorityBootstrapPlan};
 use crate::catalog;
+use crate::ingest;
 use crate::lease;
 use crate::metrics::{AuthorityMetrics, AuthorityMetricsSnapshot};
-use crate::storage::InMemoryAuthorityStorage;
+use crate::storage::{InMemoryAuthorityStorage, UploadSessionRecord};
 use crate::{AuthorityConfig, AuthorityPolicy, AuthorityResult};
 
 #[derive(Debug)]
@@ -189,5 +190,26 @@ impl PublisherAuthority {
             self.metrics.record_batch_emitted();
         }
         Ok(result)
+    }
+
+    pub fn open_bridge_session(&mut self, open: BridgeOpen) -> AuthorityResult<()> {
+        ingest::open_session(&mut self.storage, open)
+    }
+
+    pub fn ingest_bridge_frame(
+        &mut self,
+        via_bridge_id: &str,
+        frame: BridgeData,
+        received_at_ms: u64,
+    ) -> AuthorityResult<BridgeAck> {
+        ingest::ingest_frame(&mut self.storage, via_bridge_id, frame, received_at_ms)
+    }
+
+    pub fn close_bridge_session(&mut self, close: BridgeClose) -> AuthorityResult<()> {
+        ingest::close_session(&mut self.storage, close)
+    }
+
+    pub fn upload_session(&self, session_id: &str) -> Option<&UploadSessionRecord> {
+        self.storage.upload_sessions.get(session_id)
     }
 }

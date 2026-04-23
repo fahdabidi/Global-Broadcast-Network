@@ -1,7 +1,7 @@
 # GBN-PROTO-005 - Phase 2 Distributed Peer-to-Peer Onion Redesign - Execution Plan
 
 **Document ID:** GBN-PROTO-005  
-**Status:** Active - Phase 0 complete, Phase 1 complete, Phase 2 complete, Phase 3 complete, Phase 4 complete, Phase 5 implemented locally and validated
+**Status:** Active - Phase 0 complete, Phase 1 complete, Phase 2 complete, Phase 3 complete, Phase 4 complete, Phase 5 complete, Phase 6 implemented locally and validated
 **Last Updated:** 2026-04-22
 **Related Docs:** [GBN-PROTO-005 Plan](GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign.md), [GBN-ARCH-000-V2](../architecture/GBN-ARCH-000-System-Architecture-V2.md), [GBN-ARCH-001-V2](../architecture/GBN-ARCH-001-Media-Creation-Network-V2.md), [GBN-ARCH-002-V2](../architecture/GBN-ARCH-002-Bridge-Protocol-V2.md)
 
@@ -584,7 +584,7 @@ Do not modify the main repo README.md during this phase. Keep README.md pinned t
 
 Implement the creator-side bootstrap path for both returning creators and first-time creators, including HostCreator-assisted onboarding and immediate UDP punch fanout.
 
-Phase 5 is implemented locally and validated from the committed Phase 3 and Phase 4 baseline. Commit the creator-bootstrap change set before beginning Phase 6.
+Phase 5 is complete. The creator bootstrap flow is committed from the Phase 3 and Phase 4 baseline and is now the creator/runtime starting point for the Phase 6 data path.
 
 ### 8.2 Files To Create Or Modify
 
@@ -668,6 +668,8 @@ Use [GBN-PROTO-005-Execution-Phase5-V2-Creator-Bootstrap-Flow](GBN-PROTO-005-Exe
 
 Implement encrypted creator upload through the bridge and publisher ACK return path, with progressive 10-bridge fanout and bridge reuse on timeout.
 
+Phase 6 is implemented locally and validated from the committed Phase 5 creator/bootstrap baseline.
+
 ### 9.2 Files To Create Or Modify
 
 Create:
@@ -729,6 +731,10 @@ Do not modify V1 onion message framing, V1 chunk protocol types, or V1 publisher
 
 Do not modify the main repo README.md during this phase. Keep README.md pinned to the published Lattice release-facing content, and defer any V2 README updates until all V2 code changes are complete and explicitly approved as a separate documentation pass.
 ```
+
+### 9.7 Detailed Execution Reference
+
+Use [GBN-PROTO-005-Execution-Phase6-V2-Bridge-Mode-Data-Path](GBN-PROTO-005-Execution-Phase6-V2-Bridge-Mode-Data-Path.md) as the implementation checklist and current execution record for this phase. It expands the Phase 6 scope into current repo findings, trust and confidentiality boundaries, session and ACK rules, fanout / reuse policy, validation fallback strategy, risks, sign-off criteria, and the executed validation results.
 
 ---
 

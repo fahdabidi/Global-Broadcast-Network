@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
 use gbn_bridge_protocol::{
-    BootstrapDhtEntry, BridgeCapability, BridgeHeartbeat, BridgeIngressEndpoint, BridgeLease,
-    CreatorJoinRequest, PublicKeyBytes, ReachabilityClass, RevocationReason, UnixTimestampMs,
+    BootstrapDhtEntry, BridgeCapability, BridgeCloseReason, BridgeData, BridgeHeartbeat,
+    BridgeIngressEndpoint, BridgeLease, BridgeOpen, CreatorJoinRequest, PublicKeyBytes,
+    ReachabilityClass, RevocationReason, UnixTimestampMs,
 };
 
 #[derive(Debug, Clone)]
@@ -55,10 +56,51 @@ pub struct BatchWindowState {
     pub assignments: Vec<PendingBatchAssignment>,
 }
 
+#[derive(Debug, Clone)]
+pub struct IngestedFrameRecord {
+    pub via_bridge_id: String,
+    pub frame: BridgeData,
+    pub received_at_ms: UnixTimestampMs,
+}
+
+#[derive(Debug, Clone)]
+pub struct UploadSessionRecord {
+    pub session_id: String,
+    pub creator_id: String,
+    pub creator_session_pub: PublicKeyBytes,
+    pub expected_chunks: Option<u16>,
+    pub opened_at_ms: UnixTimestampMs,
+    pub opened_via_bridges: Vec<String>,
+    pub frames_by_sequence: BTreeMap<u32, IngestedFrameRecord>,
+    pub frame_id_to_sequence: BTreeMap<String, u32>,
+    pub completed_at_ms: Option<UnixTimestampMs>,
+    pub closed_at_ms: Option<UnixTimestampMs>,
+    pub close_reason: Option<BridgeCloseReason>,
+}
+
+impl UploadSessionRecord {
+    pub fn new(open: &BridgeOpen) -> Self {
+        Self {
+            session_id: open.session_id.clone(),
+            creator_id: open.creator_id.clone(),
+            creator_session_pub: open.creator_session_pub.clone(),
+            expected_chunks: open.expected_chunks,
+            opened_at_ms: open.opened_at_ms,
+            opened_via_bridges: vec![open.bridge_id.clone()],
+            frames_by_sequence: BTreeMap::new(),
+            frame_id_to_sequence: BTreeMap::new(),
+            completed_at_ms: None,
+            closed_at_ms: None,
+            close_reason: None,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct InMemoryAuthorityStorage {
     pub bridges: BTreeMap<String, BridgeRecord>,
     pub bootstrap_sessions: BTreeMap<String, BootstrapSessionRecord>,
+    pub upload_sessions: BTreeMap<String, UploadSessionRecord>,
     pub current_batch: Option<BatchWindowState>,
     next_lease_seq: u64,
     next_catalog_seq: u64,

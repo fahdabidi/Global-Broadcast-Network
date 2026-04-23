@@ -1,7 +1,7 @@
 use gbn_bridge_protocol::{
-    BootstrapDhtEntry, BootstrapProgressStage, BridgeCapability, BridgeData, BridgeIngressEndpoint,
-    BridgeLease, BridgePunchAck, BridgePunchProbe, BridgePunchStart, BridgeRegister,
-    BridgeSetRequest, BridgeSetResponse, ReachabilityClass,
+    BootstrapDhtEntry, BootstrapProgressStage, BridgeAck, BridgeCapability, BridgeClose,
+    BridgeData, BridgeIngressEndpoint, BridgeLease, BridgeOpen, BridgePunchAck, BridgePunchProbe,
+    BridgePunchStart, BridgeRegister, BridgeSetRequest, BridgeSetResponse, ReachabilityClass,
 };
 use gbn_bridge_publisher::{AuthorityBootstrapPlan, AuthorityError};
 
@@ -13,6 +13,7 @@ use crate::lease_state::LeaseState;
 use crate::progress_reporter::ProgressReporter;
 use crate::publisher_client::InProcessPublisherClient;
 use crate::punch::{PunchManager, PunchSource};
+use crate::session::BridgeSessionRegistry;
 use crate::{RuntimeError, RuntimeResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +48,7 @@ pub struct ExitBridgeRuntime {
     punch_manager: PunchManager,
     progress_reporter: ProgressReporter,
     forwarder: PayloadForwarder,
+    data_sessions: BridgeSessionRegistry,
     registered_reachability_class: Option<ReachabilityClass>,
 }
 
@@ -62,6 +64,7 @@ impl ExitBridgeRuntime {
             punch_manager: PunchManager::default(),
             progress_reporter: ProgressReporter::default(),
             forwarder: PayloadForwarder::default(),
+            data_sessions: BridgeSessionRegistry::default(),
             registered_reachability_class: None,
         }
     }
@@ -97,6 +100,10 @@ impl ExitBridgeRuntime {
 
     pub fn local_forwarded_frames(&self) -> &[crate::forwarder::ForwardedFrame] {
         self.forwarder.forwarded()
+    }
+
+    pub fn active_data_session_count(&self) -> usize {
+        self.data_sessions.active_session_count()
     }
 
     pub fn startup(
@@ -260,6 +267,41 @@ impl ExitBridgeRuntime {
     pub fn forward_creator_frame(&mut self, frame: BridgeData, now_ms: u64) -> RuntimeResult<()> {
         let _lease = self.require_direct_ingress(now_ms)?;
         self.forwarder.forward(&mut self.publisher_client, frame);
+        Ok(())
+    }
+
+    pub fn open_data_session(&mut self, open: BridgeOpen, now_ms: u64) -> RuntimeResult<()> {
+        let _lease = self.require_direct_ingress(now_ms)?;
+        if open.bridge_id != self.config.bridge_id {
+            return Err(RuntimeError::UnexpectedBridgeRuntime {
+                expected_bridge_id: self.config.bridge_id.clone(),
+                actual_bridge_id: open.bridge_id,
+            });
+        }
+
+        self.publisher_client.open_bridge_session(open.clone())?;
+        self.data_sessions.open(open);
+        Ok(())
+    }
+
+    pub fn forward_session_frame(
+        &mut self,
+        frame: BridgeData,
+        now_ms: u64,
+    ) -> RuntimeResult<BridgeAck> {
+        let _lease = self.require_direct_ingress(now_ms)?;
+        self.data_sessions.require_session(&frame.session_id)?;
+        self.forwarder
+            .forward(&mut self.publisher_client, frame.clone());
+        self.publisher_client
+            .ingest_bridge_frame(&self.config.bridge_id, frame, now_ms)
+            .map_err(Into::into)
+    }
+
+    pub fn close_data_session(&mut self, close: BridgeClose, now_ms: u64) -> RuntimeResult<()> {
+        let _lease = self.require_direct_ingress(now_ms)?;
+        self.data_sessions.close(&close)?;
+        self.publisher_client.close_bridge_session(close)?;
         Ok(())
     }
 

@@ -1,12 +1,17 @@
 //! Conduit ExitBridge runtime for registration, lease maintenance, punching, and seed bootstrap duties.
 
+pub mod ack_tracker;
 pub mod bootstrap;
 pub mod bootstrap_bridge;
 pub mod bridge;
+pub mod bridge_pool;
 pub mod catalog_cache;
+pub mod chunk_sender;
 pub mod creator;
 pub mod creator_listener;
+pub mod fanout_scheduler;
 pub mod forwarder;
+pub mod framing;
 pub mod heartbeat_loop;
 pub mod host_creator;
 pub mod lease_state;
@@ -16,20 +21,26 @@ pub mod publisher_client;
 pub mod punch;
 pub mod punch_fanout;
 pub mod selector;
+pub mod session;
 
 use gbn_bridge_protocol::{ProtocolError, ReachabilityClass};
 use gbn_bridge_publisher::AuthorityError;
 use thiserror::Error;
 
+pub use ack_tracker::AckTracker;
 pub use bootstrap::{
     establish_seed_tunnel, fetch_bridge_set, request_first_contact, SeedTunnelOutcome,
 };
 pub use bootstrap_bridge::{BootstrapBridgeState, SeedBridgeAssignment};
 pub use bridge::{ExitBridgeConfig, ExitBridgeRuntime};
+pub use bridge_pool::{BridgePool, BridgePoolEntry};
 pub use catalog_cache::CatalogCache;
+pub use chunk_sender::{ChunkSender, ChunkSenderConfig, UploadResult};
 pub use creator::{CreatorConfig, CreatorRuntime};
 pub use creator_listener::CreatorListener;
+pub use fanout_scheduler::{FanoutPlan, FanoutScheduler, FanoutSchedulerConfig, FrameDispatch};
 pub use forwarder::{ForwardedFrame, PayloadForwarder};
+pub use framing::{frame_payload, FramePayloadConfig};
 pub use heartbeat_loop::HeartbeatLoop;
 pub use host_creator::HostCreator;
 pub use lease_state::LeaseState;
@@ -38,6 +49,7 @@ pub use progress_reporter::ProgressReporter;
 pub use publisher_client::InProcessPublisherClient;
 pub use punch::{ActivePunchAttempt, PunchAuthorization, PunchManager};
 pub use punch_fanout::{CreatorPunchAck, CreatorPunchAttempt, FanoutSource, PunchFanout};
+pub use session::{UploadSession, UploadSessionConfig};
 
 pub type RuntimeResult<T> = Result<T, RuntimeError>;
 
@@ -134,6 +146,18 @@ pub enum RuntimeError {
         expected_target_id: String,
         actual_target_id: String,
     },
+
+    #[error("creator has no active bridges available for upload")]
+    NoActiveUploadBridge,
+
+    #[error("upload session `{session_id}` is not tracked by this component")]
+    UploadSessionNotTracked { session_id: String },
+
+    #[error("bridge ACK for session `{session_id}` sequence `{sequence}` was unexpected")]
+    UnexpectedBridgeAck { session_id: String, sequence: u32 },
+
+    #[error("bridge ACK rejected session `{session_id}` sequence `{sequence}`")]
+    RejectedBridgeAck { session_id: String, sequence: u32 },
 
     #[error(transparent)]
     Authority(#[from] AuthorityError),

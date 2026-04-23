@@ -1,9 +1,11 @@
 //! Conduit publisher authority plane for registration, lease, catalog, and bootstrap issuance.
 
+pub mod ack;
 pub mod authority;
 pub mod batching;
 pub mod bootstrap;
 pub mod catalog;
+pub mod ingest;
 pub mod lease;
 pub mod metrics;
 pub mod punch;
@@ -21,6 +23,7 @@ pub use metrics::{AuthorityMetrics, AuthorityMetricsSnapshot};
 pub use server::AuthorityServer;
 pub use storage::{
     BatchWindowState, BootstrapSessionRecord, BridgeRecord, InMemoryAuthorityStorage,
+    IngestedFrameRecord, UploadSessionRecord,
 };
 
 pub type AuthorityResult<T> = Result<T, AuthorityError>;
@@ -69,6 +72,19 @@ pub enum AuthorityError {
 
     #[error("bootstrap session `{bootstrap_session_id}` not found")]
     BootstrapSessionNotFound { bootstrap_session_id: String },
+
+    #[error("upload session `{session_id}` not found")]
+    UploadSessionNotFound { session_id: String },
+
+    #[error("upload session `{session_id}` was opened by `{expected_creator_id}` not `{actual_creator_id}`")]
+    UploadSessionCreatorMismatch {
+        session_id: String,
+        expected_creator_id: String,
+        actual_creator_id: String,
+    },
+
+    #[error("upload session `{session_id}` is already closed")]
+    UploadSessionClosed { session_id: String },
 
     #[error(transparent)]
     Protocol(#[from] ProtocolError),
