@@ -1,7 +1,7 @@
 # GBN-PROTO-005 - Phase 2 Distributed Peer-to-Peer Onion Redesign - Execution Plan
 
 **Document ID:** GBN-PROTO-005  
-**Status:** Active - Phase 0 complete, Phase 1 complete, Phase 2 complete, Phase 3 complete, Phase 4 complete, Phase 5 complete, Phase 6 complete, Phase 7 complete, Phase 8 complete, Phase 9 implemented locally and validated except for the V1 extended local regression, which is blocked here by missing `docker-compose`
+**Status:** Active - Phase 0 complete, Phase 1 complete, Phase 2 complete, Phase 3 complete, Phase 4 complete, Phase 5 complete, Phase 6 complete, Phase 7 complete, Phase 8 complete, Phase 9 complete, Phase 10 implemented locally with AWS deployment validation pending
 **Last Updated:** 2026-04-22
 **Related Docs:** [GBN-PROTO-005 Plan](GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign.md), [GBN-ARCH-000-V2](../architecture/GBN-ARCH-000-System-Architecture-V2.md), [GBN-ARCH-001-V2](../architecture/GBN-ARCH-001-Media-Creation-Network-V2.md), [GBN-ARCH-002-V2](../architecture/GBN-ARCH-002-Bridge-Protocol-V2.md)
 
@@ -885,7 +885,7 @@ Use [GBN-PROTO-005-Execution-Phase8-V2-Reachability-Classification](GBN-PROTO-00
 
 Create a dedicated V2 integration harness for local and CI-style bridge-mode testing across returning-creator refresh, first-time bootstrap, UDP punching, batching, and progressive upload.
 
-Phase 9 is implemented locally from the committed Phase 8 reachability-classification baseline. The V2 harness, V2 workspace sanity suite, protected V1 diff check, and minimum V1 regression suite passed. The remaining sign-off gap is the V1 extended local regression script `bash validate-scale-test.sh`, which could not complete in this environment because `docker-compose` is unavailable.
+Phase 9 is complete and committed from the Phase 8 reachability-classification baseline. The V2 harness, V2 workspace sanity suite, protected V1 diff check, and minimum V1 regression suite passed.
 
 ### 12.2 Files To Create Or Modify
 
@@ -964,6 +964,8 @@ Use [GBN-PROTO-005-Execution-Phase9-V2-Test-Harness](GBN-PROTO-005-Execution-Pha
 
 Deploy the V2 bridge-mode system to AWS, including HostCreator-assisted bootstrap and UDP punch validation, without affecting V1 infrastructure.
 
+Phase 10 is implemented locally from the committed Phase 9 test-harness baseline. The V2-only Dockerfiles, CloudFormation template, deployment scripts, and deployment entrypoints now exist. Live AWS deployment validation and the extended V1 AWS regression suite remain pending because they require Docker, AWS credentials, and target VPC/subnet inputs.
+
 ### 13.2 Files To Create Or Modify
 
 Create:
@@ -1028,6 +1030,10 @@ Do not modify any V1 infra script, CloudFormation template, or Dockerfile. V2 de
 
 Do not modify the main repo README.md during this phase. Keep README.md pinned to the published Lattice release-facing content, and defer any V2 README updates until all V2 code changes are complete and explicitly approved as a separate documentation pass.
 ```
+
+### 13.7 Detailed Execution Reference
+
+Use [GBN-PROTO-005-Execution-Phase10-V2-AWS-Prototype-Deployment](GBN-PROTO-005-Execution-Phase10-V2-AWS-Prototype-Deployment.md) as the implementation checklist and current execution record for this phase. It expands the Phase 10 scope into current repo findings, V2-only naming decisions, AWS deployment boundaries, validation fallback strategy, live-AWS sign-off requirements, and known blockers.
 
 ---
 

@@ -1,0 +1,42 @@
+[
+  {
+    "ParameterKey": "EnvironmentName",
+    "ParameterValue": "dev"
+  },
+  {
+    "ParameterKey": "VpcId",
+    "ParameterValue": "vpc-REPLACE_ME"
+  },
+  {
+    "ParameterKey": "PublicSubnetIds",
+    "ParameterValue": "subnet-REPLACE_ME_A,subnet-REPLACE_ME_B"
+  },
+  {
+    "ParameterKey": "PublisherImageUri",
+    "ParameterValue": "ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/gbn-bridge-proto-publisher:latest"
+  },
+  {
+    "ParameterKey": "BridgeImageUri",
+    "ParameterValue": "ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/gbn-bridge-proto-exit-bridge:latest"
+  },
+  {
+    "ParameterKey": "DesiredBridgeCount",
+    "ParameterValue": "3"
+  },
+  {
+    "ParameterKey": "PublisherHttpPort",
+    "ParameterValue": "8080"
+  },
+  {
+    "ParameterKey": "UdpPunchPort",
+    "ParameterValue": "443"
+  },
+  {
+    "ParameterKey": "BatchWindowMs",
+    "ParameterValue": "500"
+  },
+  {
+    "ParameterKey": "PublisherEndpoint",
+    "ParameterValue": "http://publisher.veritas.local:8080"
+  }
+]

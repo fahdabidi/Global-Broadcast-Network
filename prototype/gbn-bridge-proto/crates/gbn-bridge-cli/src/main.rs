@@ -1,3 +1,3 @@
 fn main() {
-    println!("gbn-bridge-cli: Phase 1 Conduit workspace scaffold");
+    println!("gbn-bridge-cli: use one of the deployment binaries: bridge-publisher, exit-bridge, host-creator, or creator-client");
 }
