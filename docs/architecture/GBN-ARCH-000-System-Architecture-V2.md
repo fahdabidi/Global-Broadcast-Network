@@ -3,8 +3,8 @@
 **Document ID:** GBN-ARCH-000-V2  
 **Architecture Codename:** Conduit  
 **Version:** 0.1 (Draft)  
-**Status:** In Review  
-**Last Updated:** 2026-04-21  
+**Status:** Decision Recorded - Experimental Conduit coexistence accepted
+**Last Updated:** 2026-04-23
 **Related:** [GBN-ARCH-000 (Lattice)](GBN-ARCH-000-System-Architecture.md), [GBN-ARCH-001-V2](GBN-ARCH-001-Media-Creation-Network-V2.md), [GBN-PROTO-005](../prototyping/GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign.md)
 
 ---
@@ -331,6 +331,17 @@ prototype/gbn-bridge-proto/  # Conduit (V2) bridge mode
 | Environment variables | `GBN_BRIDGE_*` prefix |
 | Scripts | Separate deploy/build/test scripts |
 
+### 7.3 Current Adoption Decision
+
+The current project decision is:
+
+- **Lattice remains the baseline and release-facing transport mode**
+- **Conduit remains an experimental parallel transport mode**
+
+Conduit is implemented as a prototype track, but it is not yet promoted to the
+default mobile or default creator transport path because live AWS/mobile
+validation remains incomplete.
+
 ---
 
 ## 8. Security Architecture
@@ -393,3 +404,4 @@ To scale first-contact onboarding, the Publisher may batch bootstrap fanout:
 | Perform immediate creator/bridge UDP hole punching after Publisher bridge refresh | Accepted |
 | Use one-time HostCreator-assisted bootstrap for first-contact creator onboarding | Accepted |
 | Batch new-creator bootstrap fanout in short Publisher windows | Accepted |
+| Keep Conduit experimental until live AWS/mobile evidence justifies promotion | Accepted |

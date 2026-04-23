@@ -1,7 +1,7 @@
 # GBN-PROTO-005 - Phase 2 Distributed Peer-to-Peer Onion Redesign - Execution Plan
 
 **Document ID:** GBN-PROTO-005  
-**Status:** Active - Phase 0 complete, Phase 1 complete, Phase 2 complete, Phase 3 complete, Phase 4 complete, Phase 5 complete, Phase 6 complete, Phase 7 complete, Phase 8 complete, Phase 9 complete, Phase 10 implemented locally with AWS deployment validation pending, Phase 11 implemented locally with live mobile validation pending
+**Status:** Active - Phase 0 complete, Phase 1 complete, Phase 2 complete, Phase 3 complete, Phase 4 complete, Phase 5 complete, Phase 6 complete, Phase 7 complete, Phase 8 complete, Phase 9 complete, Phase 10 implemented locally with AWS deployment validation pending, Phase 11 implemented locally with live mobile validation pending, Phase 12 implemented and decision recorded: Conduit remains experimental
 **Last Updated:** 2026-04-22
 **Related Docs:** [GBN-PROTO-005 Plan](GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign.md), [GBN-ARCH-000-V2](../architecture/GBN-ARCH-000-System-Architecture-V2.md), [GBN-ARCH-001-V2](../architecture/GBN-ARCH-001-Media-Creation-Network-V2.md), [GBN-ARCH-002-V2](../architecture/GBN-ARCH-002-Bridge-Protocol-V2.md)
 
@@ -1120,6 +1120,8 @@ Use [GBN-PROTO-005-Execution-Phase11-V2-Mobile-Network-Validation](GBN-PROTO-005
 
 Conclude whether V2 bridge mode should remain experimental, coexist long-term with V1 onion mode, or become the preferred mobile transport path, based on measured bootstrap viability, coordinated UDP punching, progressive upload, and onboarding scalability.
 
+Phase 12 is implemented. The current decision is that Conduit remains experimental and Lattice remains the baseline and release-facing transport mode. This decision is based on strong local implementation and harness evidence together with the still-open live AWS/mobile validation gaps from Phases 10 and 11.
+
 ### 15.2 Files To Create Or Modify
 
 Create:
@@ -1180,6 +1182,10 @@ Do not modify V1 code. Do not overwrite V1 architecture history. This phase is d
 
 Do not modify the main repo README.md during this phase. Keep README.md pinned to the published Lattice release-facing content, and defer any V2 README updates until all V2 code changes are complete and explicitly approved as a separate documentation pass.
 ```
+
+### 15.7 Detailed Execution Reference
+
+Use [GBN-PROTO-005-Execution-Phase12-V2-Decision-Gate](GBN-PROTO-005-Execution-Phase12-V2-Decision-Gate.md) as the implementation checklist and current execution record for this phase. It expands the Phase 12 scope into the current evidence boundary, recorded decision, validation results, and the remaining blockers that keep Conduit in experimental status.
 
 ---
 

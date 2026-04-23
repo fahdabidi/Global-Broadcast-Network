@@ -2,8 +2,8 @@
 
 **Document ID:** GBN-PROTO-005  
 **Phase:** 2 of 3  
-**Status:** Draft  
-**Last Updated:** 2026-04-20  
+**Status:** Decision Recorded - Conduit remains experimental
+**Last Updated:** 2026-04-23
 **Related Docs:** [GBN-ARCH-000-V2](../architecture/GBN-ARCH-000-System-Architecture-V2.md), [GBN-ARCH-001-V2](../architecture/GBN-ARCH-001-Media-Creation-Network-V2.md), [GBN-PROTO-004](GBN-PROTO-004-Phase2-Serverless-Scale-Onion-Plan.md), [GBN-PROTO-004-Test](GBN-PROTO-004-Phase2-Serverless-Scale-Test.md)
 
 ---
@@ -523,3 +523,27 @@ This prototype phase is successful when:
 - encrypted payloads reach the Publisher through bridge mode using progressively activated bridges
 - bridge reuse and failover work without depending on V1 onion routing
 - the V1 implementation remains untouched and runnable
+
+## 14. Decision Outcome
+
+The prototype implementation and local harness work are complete enough to
+support a final project decision.
+
+That decision is:
+
+- **Conduit remains experimental**
+- **Lattice remains the baseline and release-facing transport mode**
+
+Why this is the current result:
+
+- the repo now proves the Conduit control plane, bootstrap path, reachability
+  policy, bridge-mode data path, weak discovery boundary, batching behavior, and
+  local validation harness
+- the repo does not yet prove live AWS/mobile bootstrap viability, real NAT
+  punch success rates, live batch onboarding latency, or extended V1 AWS
+  regression after the V2 infra merge
+
+So the Phase 2 redesign assumptions are best read as:
+
+- locally supported for prototype implementation and harness validation
+- still incomplete for promotion to the default or release-facing transport path

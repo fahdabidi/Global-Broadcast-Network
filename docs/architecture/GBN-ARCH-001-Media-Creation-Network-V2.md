@@ -3,8 +3,8 @@
 **Document ID:** GBN-ARCH-001-V2  
 **Architecture Codename:** Conduit  
 **Version:** 0.1 (Draft)  
-**Status:** In Review  
-**Last Updated:** 2026-04-21  
+**Status:** Decision Recorded - Experimental Conduit coexistence accepted
+**Last Updated:** 2026-04-23
 **Parent Architecture:** [GBN-ARCH-000-V2 (Conduit)](GBN-ARCH-000-System-Architecture-V2.md)  
 **Related Prototype:** [GBN-PROTO-005](../prototyping/GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign.md)
 
@@ -345,3 +345,26 @@ Only after M3/M4 validation should the project decide whether Conduit remains:
 
 - a parallel mobile transport mode
 - or the preferred creator upload mode for later phases
+
+### 10.1 Current Decision
+
+That decision has now been recorded.
+
+Current state:
+
+- **Lattice remains the baseline transport architecture**
+- **Conduit remains experimental**
+
+The prototype has strong local harness evidence for bootstrap, punch ACK,
+failover, reuse, and batching control flow, but it still lacks the live
+AWS/mobile measurements required to promote Conduit beyond experimental status.
+
+### 10.2 Promotion Gate
+
+Conduit should only be reconsidered for promotion after:
+
+- live AWS bootstrap succeeds
+- live mobile-network churn and network-switch behavior are measured
+- coordinated UDP punch success rates are measured in real conditions
+- batch onboarding latency is measured under live deployment conditions
+- extended V1 AWS regression passes after the V2 infra merge
