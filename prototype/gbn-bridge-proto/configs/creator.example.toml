@@ -1,0 +1,7 @@
+# Example local creator bootstrap configuration for Conduit Phase 5.
+
+creator_id = "creator-example-01"
+ip_addr = "203.0.113.10"
+udp_punch_port = 443
+publisher_trust_root_source = "embedded-or-file-path"
+refresh_reason = "startup"

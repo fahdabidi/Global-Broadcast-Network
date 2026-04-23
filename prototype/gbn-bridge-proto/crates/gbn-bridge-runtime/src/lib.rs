@@ -1,28 +1,43 @@
 //! Conduit ExitBridge runtime for registration, lease maintenance, punching, and seed bootstrap duties.
 
+pub mod bootstrap;
 pub mod bootstrap_bridge;
 pub mod bridge;
+pub mod catalog_cache;
+pub mod creator;
 pub mod creator_listener;
 pub mod forwarder;
 pub mod heartbeat_loop;
+pub mod host_creator;
 pub mod lease_state;
+pub mod local_dht;
 pub mod progress_reporter;
 pub mod publisher_client;
 pub mod punch;
+pub mod punch_fanout;
+pub mod selector;
 
 use gbn_bridge_protocol::{ProtocolError, ReachabilityClass};
 use gbn_bridge_publisher::AuthorityError;
 use thiserror::Error;
 
+pub use bootstrap::{
+    establish_seed_tunnel, fetch_bridge_set, request_first_contact, SeedTunnelOutcome,
+};
 pub use bootstrap_bridge::{BootstrapBridgeState, SeedBridgeAssignment};
 pub use bridge::{ExitBridgeConfig, ExitBridgeRuntime};
+pub use catalog_cache::CatalogCache;
+pub use creator::{CreatorConfig, CreatorRuntime};
 pub use creator_listener::CreatorListener;
 pub use forwarder::{ForwardedFrame, PayloadForwarder};
 pub use heartbeat_loop::HeartbeatLoop;
+pub use host_creator::HostCreator;
 pub use lease_state::LeaseState;
+pub use local_dht::{LocalDht, LocalDhtNode, LocalHintSource};
 pub use progress_reporter::ProgressReporter;
 pub use publisher_client::InProcessPublisherClient;
 pub use punch::{ActivePunchAttempt, PunchAuthorization, PunchManager};
+pub use punch_fanout::{CreatorPunchAck, CreatorPunchAttempt, FanoutSource, PunchFanout};
 
 pub type RuntimeResult<T> = Result<T, RuntimeError>;
 
@@ -68,6 +83,57 @@ pub enum RuntimeError {
 
     #[error("bridge `{bridge_id}` has no remembered reachability class for re-registration")]
     MissingReachabilityClass { bridge_id: String },
+
+    #[error("creator has no publisher trust root loaded")]
+    MissingPublisherTrustRoot,
+
+    #[error("publisher trust root mismatch: expected {expected:?}, got {actual:?}")]
+    PublisherTrustRootMismatch {
+        expected: gbn_bridge_protocol::PublicKeyBytes,
+        actual: gbn_bridge_protocol::PublicKeyBytes,
+    },
+
+    #[error("creator has no valid cached catalog")]
+    CatalogUnavailable,
+
+    #[error("no valid direct bridge candidate is available")]
+    NoUsableBridgeCandidate,
+
+    #[error(
+        "creator identity mismatch: expected `{expected_creator_id}`, got `{actual_creator_id}`"
+    )]
+    CreatorIdentityMismatch {
+        expected_creator_id: String,
+        actual_creator_id: String,
+    },
+
+    #[error(
+        "bridge runtime mismatch: expected bridge `{expected_bridge_id}`, got `{actual_bridge_id}`"
+    )]
+    UnexpectedBridgeRuntime {
+        expected_bridge_id: String,
+        actual_bridge_id: String,
+    },
+
+    #[error(
+        "bridge set session mismatch: expected `{expected_bootstrap_session_id}`, got `{actual_bootstrap_session_id}`"
+    )]
+    BridgeSetSessionMismatch {
+        expected_bootstrap_session_id: String,
+        actual_bootstrap_session_id: String,
+    },
+
+    #[error("creator fanout attempt `{bootstrap_session_id}` is not tracked by this creator")]
+    CreatorBootstrapSessionNotTracked { bootstrap_session_id: String },
+
+    #[error(
+        "creator punch target mismatch for `{bootstrap_session_id}`: expected `{expected_target_id}`, got `{actual_target_id}`"
+    )]
+    CreatorPunchTargetMismatch {
+        bootstrap_session_id: String,
+        expected_target_id: String,
+        actual_target_id: String,
+    },
 
     #[error(transparent)]
     Authority(#[from] AuthorityError),

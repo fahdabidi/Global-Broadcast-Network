@@ -1,7 +1,7 @@
 # GBN-PROTO-005 - Phase 2 Distributed Peer-to-Peer Onion Redesign - Execution Plan
 
 **Document ID:** GBN-PROTO-005  
-**Status:** Active - Phase 0 complete, Phase 1 complete, Phase 2 complete, Phase 3 implemented locally and validated, Phase 4 implemented locally and validated
+**Status:** Active - Phase 0 complete, Phase 1 complete, Phase 2 complete, Phase 3 complete, Phase 4 complete, Phase 5 implemented locally and validated
 **Last Updated:** 2026-04-22
 **Related Docs:** [GBN-PROTO-005 Plan](GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign.md), [GBN-ARCH-000-V2](../architecture/GBN-ARCH-000-System-Architecture-V2.md), [GBN-ARCH-001-V2](../architecture/GBN-ARCH-001-Media-Creation-Network-V2.md), [GBN-ARCH-002-V2](../architecture/GBN-ARCH-002-Bridge-Protocol-V2.md)
 
@@ -426,7 +426,7 @@ Use [GBN-PROTO-005-Execution-Phase2-V2-Wire-Model](GBN-PROTO-005-Execution-Phase
 
 Implement the publisher-side authority service that signs leases, serves bridge catalogs, and coordinates first-contact bootstrap plus batched punch fanout.
 
-Phase 3 is implemented locally and validated from the committed Phase 2 protocol baseline and the published Lattice preservation baseline. Commit the Phase 3 authority-plane change set before beginning Phase 4.
+Phase 3 is complete. The publisher authority plane is committed from the Phase 2 protocol baseline and remains the authority surface for all later Conduit work.
 
 ### 6.2 Files To Create Or Modify
 
@@ -509,7 +509,7 @@ Use [GBN-PROTO-005-Execution-Phase3-V2-Publisher-Authority-Plane](GBN-PROTO-005-
 
 Implement the runtime for an authorized ExitBridge node, including Publisher-directed UDP hole punching and seed-bridge bootstrap duties.
 
-Phase 4 is implemented locally and validated against the current Phase 3 authority surface. Commit the combined Conduit Phase 3 and Phase 4 change set before beginning Phase 5.
+Phase 4 is complete. The ExitBridge runtime is committed against the current Phase 3 authority surface and is the bridge baseline for creator bootstrap work.
 
 ### 7.2 Files To Create Or Modify
 
@@ -584,6 +584,8 @@ Do not modify the main repo README.md during this phase. Keep README.md pinned t
 
 Implement the creator-side bootstrap path for both returning creators and first-time creators, including HostCreator-assisted onboarding and immediate UDP punch fanout.
 
+Phase 5 is implemented locally and validated from the committed Phase 3 and Phase 4 baseline. Commit the creator-bootstrap change set before beginning Phase 6.
+
 ### 8.2 Files To Create Or Modify
 
 Create:
@@ -653,6 +655,10 @@ Do not modify the V1 creator circuit manager or V1 upload path. This is a new bo
 
 Do not modify the main repo README.md during this phase. Keep README.md pinned to the published Lattice release-facing content, and defer any V2 README updates until all V2 code changes are complete and explicitly approved as a separate documentation pass.
 ```
+
+### 8.7 Detailed Execution Reference
+
+Use [GBN-PROTO-005-Execution-Phase5-V2-Creator-Bootstrap-Flow](GBN-PROTO-005-Execution-Phase5-V2-Creator-Bootstrap-Flow.md) as the implementation checklist and current execution record for this phase. It expands the Phase 5 scope into current repo findings, trust-root and cache rules, HostCreator trust-boundary assumptions, selector and fanout policy, validation fallback strategy, risks, sign-off criteria, and the executed validation results.
 
 ---
 

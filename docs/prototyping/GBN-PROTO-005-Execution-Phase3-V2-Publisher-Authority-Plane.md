@@ -1,6 +1,6 @@
 # GBN-PROTO-005 - Execution Phase 3 Detailed Plan: Publisher Authority Plane
 
-**Status:** Implemented and validated locally from the committed Phase 2 protocol baseline; commit pending
+**Status:** Completed from the committed Phase 2 protocol baseline
 **Primary Goal:** implement the Conduit publisher authority service in `gbn-bridge-publisher` without mutating the frozen V1 Lattice publisher or prematurely pulling runtime / deployment concerns into the authority plane
 **Source Plan:** [GBN-PROTO-005 Execution Plan](GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign-Execution-Plan.md)
 **Phase 0 Baseline Release:** [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline)
@@ -15,11 +15,11 @@ These findings should drive Phase 3 execution instead of being rediscovered duri
 | Item | Current Value | Why It Matters |
 |---|---|---|
 | Current branch | `main` | Phase 3 should record the mainline commit used to begin authority-plane work |
-| Current HEAD commit | `e58b1bf130807c57289b92f014b2d35ca43ca5ce` | this is the committed post-Phase-2 starting point for publisher authority work |
+| Current HEAD commit | `baa17ea8c35a444ca6665de424d489883559470a` | this is the current committed Conduit baseline that includes the Phase 3 authority plane and the Phase 4 bridge runtime |
 | Phase 0 baseline release | `veritas-lattice-0.1.0-baseline` published | the V1 Lattice publisher remains the preservation reference point |
 | Existing V2 workspace path | `prototype/gbn-bridge-proto/` exists | Phase 3 must build entirely inside the isolated Conduit workspace |
 | Current protocol crate state | canonical M1 Conduit wire model is committed in `gbn-bridge-protocol` and documented in `GBN-ARCH-002` | authority logic now has a fixed protocol surface and should not rename or reshape protocol types casually |
-| Current publisher crate state | authority-plane modules and `tests/authority_flow.rs` are implemented locally in `gbn-bridge-publisher` | Phase 3 now needs commit/sign-off rather than placeholder replacement |
+| Current publisher crate state | authority-plane modules and `tests/authority_flow.rs` are committed in `gbn-bridge-publisher` | Phase 3 is now the committed authority baseline for later Conduit phases |
 | Current CLI state | `gbn-bridge-cli/src/main.rs` still prints the Phase 1 scaffold message | Phase 3 may only make narrow V2-local CLI adjustments if they help authority tests; it should not turn Phase 3 into a CLI phase |
 | Current protected V1 path drift | none | V1 preservation is still a hard sign-off gate |
 | Current validation environment risk | OneDrive-backed V2 `target/` writes still fail with Windows `os error 5` during `cargo test --workspace` | Phase 3 validation must record the temp `--target-dir` workaround as the executed test path |
@@ -84,7 +84,7 @@ If any gate fails, Phase 3 should stop. The point here is to implement the autho
 
 Current blocker:
 
-- none; Phase 3 is implemented locally and only needs commit/sign-off to close
+- none; Phase 3 is complete
 
 ---
 
@@ -331,7 +331,7 @@ Phase 3 is complete only when all of the following are true:
 
 Current blocker:
 
-- none at the design level; only commit/sign-off remains after the executed validation pass
+- none; Phase 3 is complete
 
 ---
 

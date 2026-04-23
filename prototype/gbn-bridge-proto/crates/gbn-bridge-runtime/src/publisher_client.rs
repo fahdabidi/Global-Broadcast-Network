@@ -1,8 +1,8 @@
 use gbn_bridge_protocol::{
-    BootstrapProgress, BridgeData, BridgeHeartbeat, BridgeLease, BridgeRegister, PublicKeyBytes,
-    ReachabilityClass,
+    BootstrapProgress, BridgeCatalogRequest, BridgeCatalogResponse, BridgeData, BridgeHeartbeat,
+    BridgeLease, BridgeRegister, CreatorJoinRequest, PublicKeyBytes, ReachabilityClass,
 };
-use gbn_bridge_publisher::{AuthorityResult, PublisherAuthority};
+use gbn_bridge_publisher::{AuthorityBootstrapPlan, AuthorityResult, PublisherAuthority};
 
 #[derive(Debug)]
 pub struct InProcessPublisherClient {
@@ -48,6 +48,22 @@ impl InProcessPublisherClient {
 
     pub fn renew_lease(&mut self, heartbeat: BridgeHeartbeat) -> AuthorityResult<BridgeLease> {
         self.authority.handle_heartbeat(heartbeat)
+    }
+
+    pub fn issue_catalog(
+        &mut self,
+        request: &BridgeCatalogRequest,
+        now_ms: u64,
+    ) -> AuthorityResult<BridgeCatalogResponse> {
+        self.authority.issue_catalog(request, now_ms)
+    }
+
+    pub fn begin_bootstrap(
+        &mut self,
+        request: CreatorJoinRequest,
+        now_ms: u64,
+    ) -> AuthorityResult<AuthorityBootstrapPlan> {
+        self.authority.begin_bootstrap(request, now_ms)
     }
 
     pub fn report_progress(&mut self, progress: BootstrapProgress) {

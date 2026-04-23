@@ -1,0 +1,5 @@
+# Example local HostCreator transport-sponsor configuration for Conduit Phase 5.
+
+host_creator_id = "host-creator-example-01"
+relay_bridge_id = "bridge-relay-example-01"
+join_request_window_ms = 20000
