@@ -5,6 +5,7 @@ use gbn_bridge_protocol::{PublicKeyBytes, ReachabilityClass};
 use crate::catalog_cache::CatalogCache;
 use crate::discovery::{DiscoveryHintSource, WeakDiscoveryState};
 use crate::local_dht::{LocalDht, LocalHintSource};
+use crate::reachability;
 use crate::{RuntimeError, RuntimeResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +53,7 @@ pub fn merge_refresh_candidates(
         .snapshot()
         .into_iter()
         .filter(|node| matches!(node.source, LocalHintSource::Bootstrap))
+        .filter(|node| reachability::is_creator_ingress_capable(&node.reachability_class))
         .filter(|node| node.expires_at_ms >= now_ms)
         .filter(|node| !excluded_bridge_ids.contains(&node.node_id))
         .collect();
@@ -83,30 +85,42 @@ pub fn merge_refresh_candidates(
             let mut catalog_candidates: Vec<_> = catalog
                 .bridges
                 .iter()
-                .filter(|bridge| matches!(bridge.reachability_class, ReachabilityClass::Direct))
                 .filter(|bridge| !excluded_bridge_ids.contains(&bridge.bridge_id))
                 .cloned()
                 .collect();
 
             catalog_candidates.sort_by(|left, right| {
-                right
-                    .lease_expiry_ms
-                    .cmp(&left.lease_expiry_ms)
+                let left_rank = match left.reachability_class {
+                    ReachabilityClass::Direct => 0_u8,
+                    ReachabilityClass::Brokered => 1,
+                    ReachabilityClass::RelayOnly => 2,
+                };
+                let right_rank = match right.reachability_class {
+                    ReachabilityClass::Direct => 0_u8,
+                    ReachabilityClass::Brokered => 1,
+                    ReachabilityClass::RelayOnly => 2,
+                };
+
+                left_rank
+                    .cmp(&right_rank)
+                    .then_with(|| right.lease_expiry_ms.cmp(&left.lease_expiry_ms))
                     .then_with(|| left.bridge_id.cmp(&right.bridge_id))
             });
 
             for bridge in catalog_candidates {
                 if seen.insert(bridge.bridge_id.clone()) {
-                    if let Some(endpoint) = bridge.ingress_endpoints.first() {
-                        candidates.push(RefreshCandidate {
-                            bridge_id: bridge.bridge_id,
-                            host: endpoint.host.clone(),
-                            port: bridge.udp_punch_port,
-                            authority: RefreshCandidateAuthority::Signed,
-                            source: RefreshCandidateSource::Catalog,
-                            expires_at_ms: Some(bridge.lease_expiry_ms),
-                            observed_at_ms: catalog.issued_at_ms,
-                        });
+                    if reachability::is_transport_eligible_bridge(&bridge) {
+                        if let Some(endpoint) = bridge.ingress_endpoints.first() {
+                            candidates.push(RefreshCandidate {
+                                bridge_id: bridge.bridge_id,
+                                host: endpoint.host.clone(),
+                                port: bridge.udp_punch_port,
+                                authority: RefreshCandidateAuthority::Signed,
+                                source: RefreshCandidateSource::Catalog,
+                                expires_at_ms: Some(bridge.lease_expiry_ms),
+                                observed_at_ms: catalog.issued_at_ms,
+                            });
+                        }
                     }
                 }
             }

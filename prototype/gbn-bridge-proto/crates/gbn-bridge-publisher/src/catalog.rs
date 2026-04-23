@@ -4,7 +4,7 @@ use gbn_bridge_protocol::{
     BridgeDescriptorUnsigned,
 };
 
-use crate::registry;
+use crate::policy;
 use crate::storage::InMemoryAuthorityStorage;
 use crate::{AuthorityConfig, AuthorityError, AuthorityPolicy, AuthorityResult};
 
@@ -16,8 +16,7 @@ pub fn issue_catalog(
     request: &BridgeCatalogRequest,
     now_ms: u64,
 ) -> AuthorityResult<BridgeCatalogResponse> {
-    let direct_only = request.direct_only || !policy.allow_non_direct_catalog_entries;
-    let bridges = registry::active_bridge_records(storage, now_ms, direct_only)
+    let bridges = policy::catalog_candidates(storage, now_ms, policy, request.direct_only)
         .into_iter()
         .map(|record| {
             BridgeDescriptor::sign(

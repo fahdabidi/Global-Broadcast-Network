@@ -34,6 +34,26 @@ pub fn handle_heartbeat(
     registry::renew_lease_from_heartbeat(storage, signing_key, config, heartbeat)
 }
 
+pub fn reclassify_bridge(
+    storage: &mut InMemoryAuthorityStorage,
+    signing_key: &SigningKey,
+    config: &AuthorityConfig,
+    bridge_id: &str,
+    reachability_class: ReachabilityClass,
+    udp_punch_port: Option<u16>,
+    now_ms: u64,
+) -> AuthorityResult<BridgeLease> {
+    registry::reclassify_bridge(
+        storage,
+        signing_key,
+        config,
+        bridge_id,
+        reachability_class,
+        udp_punch_port,
+        now_ms,
+    )
+}
+
 pub fn revoke_bridge(
     storage: &mut InMemoryAuthorityStorage,
     signing_key: &SigningKey,

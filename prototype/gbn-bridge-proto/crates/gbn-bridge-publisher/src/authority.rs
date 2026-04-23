@@ -90,6 +90,24 @@ impl PublisherAuthority {
         result
     }
 
+    pub fn reclassify_bridge(
+        &mut self,
+        bridge_id: &str,
+        reachability_class: ReachabilityClass,
+        udp_punch_port: Option<u16>,
+        now_ms: u64,
+    ) -> AuthorityResult<BridgeLease> {
+        lease::reclassify_bridge(
+            &mut self.storage,
+            &self.signing_key,
+            &self.config,
+            bridge_id,
+            reachability_class,
+            udp_punch_port,
+            now_ms,
+        )
+    }
+
     pub fn handle_heartbeat(&mut self, heartbeat: BridgeHeartbeat) -> AuthorityResult<BridgeLease> {
         let result = lease::handle_heartbeat(
             &mut self.storage,

@@ -55,6 +55,21 @@ impl InProcessPublisherClient {
         self.authority.borrow_mut().handle_heartbeat(heartbeat)
     }
 
+    pub fn reclassify_bridge(
+        &mut self,
+        bridge_id: &str,
+        reachability_class: ReachabilityClass,
+        udp_punch_port: Option<u16>,
+        now_ms: u64,
+    ) -> AuthorityResult<BridgeLease> {
+        self.authority.borrow_mut().reclassify_bridge(
+            bridge_id,
+            reachability_class,
+            udp_punch_port,
+            now_ms,
+        )
+    }
+
     pub fn issue_catalog(
         &mut self,
         request: &BridgeCatalogRequest,

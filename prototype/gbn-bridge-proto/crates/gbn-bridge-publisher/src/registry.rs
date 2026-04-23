@@ -132,6 +132,55 @@ pub fn renew_lease_from_heartbeat(
     Ok(renewed)
 }
 
+pub fn reclassify_bridge(
+    storage: &mut InMemoryAuthorityStorage,
+    signing_key: &SigningKey,
+    config: &AuthorityConfig,
+    bridge_id: &str,
+    reachability_class: ReachabilityClass,
+    udp_punch_port: Option<u16>,
+    now_ms: u64,
+) -> AuthorityResult<BridgeLease> {
+    let record =
+        storage
+            .bridges
+            .get_mut(bridge_id)
+            .ok_or_else(|| AuthorityError::BridgeNotFound {
+                bridge_id: bridge_id.to_string(),
+            })?;
+
+    if record.revoked_reason.is_some() {
+        return Err(AuthorityError::BridgeRevoked {
+            bridge_id: bridge_id.to_string(),
+        });
+    }
+
+    let assigned_udp_punch_port = udp_punch_port.unwrap_or(record.assigned_udp_punch_port);
+    if assigned_udp_punch_port == 0 {
+        return Err(AuthorityError::InvalidBridgeRegistration {
+            reason: "bridge udp punch port must be non-zero",
+        });
+    }
+
+    record.assigned_udp_punch_port = assigned_udp_punch_port;
+    record.reachability_class = reachability_class.clone();
+    let lease_unsigned = BridgeLeaseUnsigned {
+        lease_id: record.current_lease.lease_id.clone(),
+        bridge_id: record.bridge_id.clone(),
+        udp_punch_port: assigned_udp_punch_port,
+        reachability_class,
+        lease_expiry_ms: now_ms + config.lease_ttl_ms,
+        issued_at_ms: now_ms,
+        heartbeat_interval_ms: config.heartbeat_interval_ms,
+        capabilities: record.capabilities.clone(),
+    };
+    let lease = BridgeLease::sign(lease_unsigned, signing_key)?;
+    record.current_lease = lease.clone();
+    record.last_heartbeat.heartbeat_at_ms = now_ms;
+
+    Ok(lease)
+}
+
 pub fn revoke_bridge(
     storage: &mut InMemoryAuthorityStorage,
     signing_key: &SigningKey,

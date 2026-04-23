@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use gbn_bridge_protocol::{BootstrapDhtEntry, BridgeDescriptor, PublicKeyBytes, ReachabilityClass};
 
+use crate::reachability;
 use crate::RuntimeResult;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,10 +55,13 @@ impl LocalDht {
         for bridge in bridges {
             bridge.verify_authority(publisher_key, now_ms)?;
             if let Some(endpoint) = bridge.ingress_endpoints.first() {
-                let active_tunnel_since_ms = self
-                    .nodes
-                    .get(&bridge.bridge_id)
-                    .and_then(|existing| existing.active_tunnel_since_ms);
+                let active_tunnel_since_ms = reachability::preserve_active_tunnel(
+                    self.nodes.get(&bridge.bridge_id),
+                    &endpoint.host,
+                    &bridge.identity_pub,
+                    bridge.udp_punch_port,
+                    &bridge.reachability_class,
+                );
                 self.nodes.insert(
                     bridge.bridge_id.clone(),
                     LocalDhtNode {
@@ -86,10 +90,13 @@ impl LocalDht {
     ) -> RuntimeResult<usize> {
         for entry in entries {
             entry.verify_authority(publisher_key, now_ms)?;
-            let active_tunnel_since_ms = self
-                .nodes
-                .get(&entry.node_id)
-                .and_then(|existing| existing.active_tunnel_since_ms);
+            let active_tunnel_since_ms = reachability::preserve_active_tunnel(
+                self.nodes.get(&entry.node_id),
+                &entry.ip_addr,
+                &entry.pub_key,
+                entry.udp_punch_port,
+                &ReachabilityClass::Direct,
+            );
             self.nodes.insert(
                 entry.node_id.clone(),
                 LocalDhtNode {

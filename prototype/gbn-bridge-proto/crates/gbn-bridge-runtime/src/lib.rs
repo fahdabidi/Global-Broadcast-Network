@@ -22,6 +22,7 @@ pub mod progress_reporter;
 pub mod publisher_client;
 pub mod punch;
 pub mod punch_fanout;
+pub mod reachability;
 pub mod seed_catalog;
 pub mod selector;
 pub mod session;

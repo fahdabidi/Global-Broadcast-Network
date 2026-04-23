@@ -2,8 +2,8 @@ use ed25519_dalek::SigningKey;
 use gbn_bridge_protocol::{BatchAssignment, CreatorJoinRequest};
 
 use crate::bootstrap::creator_bootstrap_entry;
+use crate::policy;
 use crate::punch;
-use crate::registry;
 use crate::storage::{BatchWindowState, InMemoryAuthorityStorage, PendingBatchAssignment};
 use crate::{AuthorityConfig, AuthorityError, AuthorityPolicy, AuthorityResult};
 
@@ -103,15 +103,11 @@ fn finalize_current_batch(
         .take()
         .expect("current batch should exist when finalized");
 
-    let bridge_ids = registry::active_bridge_records(
-        storage,
-        window_started_at_ms,
-        policy.direct_only_bootstrap,
-    )
-    .into_iter()
-    .take(config.bootstrap_bridge_count)
-    .map(|record| record.bridge_id)
-    .collect::<Vec<_>>();
+    let bridge_ids = policy::bootstrap_candidates(storage, window_started_at_ms, policy)
+        .into_iter()
+        .take(config.bootstrap_bridge_count)
+        .map(|record| record.bridge_id)
+        .collect::<Vec<_>>();
     if bridge_ids.is_empty() {
         return Err(AuthorityError::NoEligibleBatchBridge);
     }

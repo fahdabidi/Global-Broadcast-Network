@@ -4,8 +4,8 @@ use gbn_bridge_protocol::{
     CreatorBootstrapResponse, CreatorBootstrapResponseUnsigned, CreatorJoinRequest, PublicKeyBytes,
 };
 
+use crate::policy;
 use crate::punch;
-use crate::registry;
 use crate::storage::{BootstrapSessionRecord, BridgeRecord, InMemoryAuthorityStorage};
 use crate::{AuthorityConfig, AuthorityError, AuthorityPolicy, AuthorityResult};
 
@@ -85,8 +85,7 @@ pub fn begin_bootstrap(
     now_ms: u64,
 ) -> AuthorityResult<AuthorityBootstrapPlan> {
     let creator_entry = creator_bootstrap_entry(&request, signing_key, config, now_ms)?;
-    let mut eligible =
-        registry::active_bridge_records(storage, now_ms, policy.direct_only_bootstrap);
+    let mut eligible = policy::bootstrap_candidates(storage, now_ms, policy);
     if eligible.is_empty() {
         return Err(AuthorityError::NoEligibleBootstrapBridge);
     }

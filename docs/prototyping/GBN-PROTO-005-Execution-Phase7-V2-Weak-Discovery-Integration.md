@@ -1,6 +1,6 @@
 # GBN-PROTO-005 - Execution Phase 7 Detailed Plan: Weak Discovery Integration
 
-**Status:** Implemented locally and validated from the committed Phase 6 bridge-mode data-path baseline
+**Status:** Completed from the committed Phase 6 bridge-mode data-path baseline
 **Primary Goal:** add a V2-local weak-discovery layer that can surface candidate bridge hints without granting transport trust, mutating the frozen V1 discovery surfaces, or pulling Phase 8 reachability policy forward prematurely
 **Source Plan:** [GBN-PROTO-005 Execution Plan](GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign-Execution-Plan.md)
 **Phase 0 Baseline Release:** [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline)

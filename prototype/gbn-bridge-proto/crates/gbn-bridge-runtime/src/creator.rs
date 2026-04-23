@@ -192,7 +192,7 @@ impl CreatorRuntime {
                 .catalog_cache
                 .current()
                 .map(|catalog| catalog.catalog_id.clone()),
-            direct_only: true,
+            direct_only: false,
             refresh_hint: Some(BridgeRefreshHint {
                 bridge_id: Some(bridge.config().bridge_id.clone()),
                 reason,

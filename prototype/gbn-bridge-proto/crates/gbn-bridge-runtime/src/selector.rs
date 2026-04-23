@@ -1,9 +1,8 @@
 use std::collections::BTreeSet;
 
-use gbn_bridge_protocol::{
-    BridgeCatalogResponse, BridgeDescriptor, PublicKeyBytes, ReachabilityClass,
-};
+use gbn_bridge_protocol::{BridgeCatalogResponse, BridgeDescriptor, PublicKeyBytes};
 
+use crate::reachability;
 use crate::{RuntimeError, RuntimeResult};
 
 pub fn ordered_direct_bridges(
@@ -17,7 +16,7 @@ pub fn ordered_direct_bridges(
     let mut bridges: Vec<_> = catalog
         .bridges
         .iter()
-        .filter(|bridge| matches!(bridge.reachability_class, ReachabilityClass::Direct))
+        .filter(|bridge| reachability::is_transport_eligible_bridge(bridge))
         .filter(|bridge| !excluded_bridge_ids.contains(&bridge.bridge_id))
         .cloned()
         .collect();
