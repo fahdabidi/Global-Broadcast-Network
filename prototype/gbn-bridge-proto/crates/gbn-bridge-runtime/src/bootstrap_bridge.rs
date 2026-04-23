@@ -1,0 +1,71 @@
+use std::collections::BTreeMap;
+
+use gbn_bridge_protocol::{
+    BridgeSetRequest, BridgeSetResponse, CreatorBootstrapResponse, PublicKeyBytes,
+};
+use gbn_bridge_publisher::AuthorityBootstrapPlan;
+
+use crate::{RuntimeError, RuntimeResult};
+
+#[derive(Debug, Clone)]
+pub struct SeedBridgeAssignment {
+    pub response: CreatorBootstrapResponse,
+    pub bridge_set: BridgeSetResponse,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BootstrapBridgeState {
+    assignments: BTreeMap<String, SeedBridgeAssignment>,
+}
+
+impl BootstrapBridgeState {
+    pub fn assign_from_plan(
+        &mut self,
+        bridge_id: &str,
+        publisher_key: &PublicKeyBytes,
+        plan: &AuthorityBootstrapPlan,
+        now_ms: u64,
+    ) -> RuntimeResult<bool> {
+        plan.response.verify_authority(publisher_key, now_ms)?;
+        plan.bridge_set.verify_authority(publisher_key, now_ms)?;
+        plan.seed_punch.verify_authority(publisher_key, now_ms)?;
+
+        if plan.response.seed_bridge.node_id != bridge_id
+            || plan.seed_punch.initiator_id != bridge_id
+        {
+            return Ok(false);
+        }
+
+        self.assignments.insert(
+            plan.response.bootstrap_session_id.clone(),
+            SeedBridgeAssignment {
+                response: plan.response.clone(),
+                bridge_set: plan.bridge_set.clone(),
+            },
+        );
+        Ok(true)
+    }
+
+    pub fn has_assignment(&self, bootstrap_session_id: &str) -> bool {
+        self.assignments.contains_key(bootstrap_session_id)
+    }
+
+    pub fn serve_bridge_set(
+        &self,
+        request: &BridgeSetRequest,
+        publisher_key: &PublicKeyBytes,
+        now_ms: u64,
+    ) -> RuntimeResult<BridgeSetResponse> {
+        let assignment = self
+            .assignments
+            .get(&request.bootstrap_session_id)
+            .ok_or_else(|| RuntimeError::BootstrapSessionNotTracked {
+                bootstrap_session_id: request.bootstrap_session_id.clone(),
+            })?;
+
+        assignment
+            .bridge_set
+            .verify_authority(publisher_key, now_ms)?;
+        Ok(assignment.bridge_set.clone())
+    }
+}

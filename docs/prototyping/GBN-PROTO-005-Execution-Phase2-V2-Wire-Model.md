@@ -1,6 +1,6 @@
 # GBN-PROTO-005 - Execution Phase 2 Detailed Plan: Lock The V2 Wire Model
 
-**Status:** Implemented and validated locally; pending commit and explicit approval before Phase 3
+**Status:** Completed and validated from the committed Phase 2 protocol baseline
 **Primary Goal:** implement the canonical M1 Conduit protocol schema set in `gbn-bridge-protocol` without introducing runtime behavior or mutating the V1 Lattice codebase
 **Source Plan:** [GBN-PROTO-005 Execution Plan](GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign-Execution-Plan.md)
 **Phase 0 Baseline Release:** [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline)
@@ -14,11 +14,11 @@ These findings should record the actual current Phase 2 state instead of forcing
 
 | Item | Current Value | Why It Matters |
 |---|---|---|
-| Current branch | `main` | Phase 2 implementation is being developed on the mainline branch |
-| Current HEAD commit | `70aadd0ac4d75e63093954a7ccfaeda23f954702` | current committed starting point beneath the local Phase 2 protocol work |
+| Current branch | `main` | Phase 2 was implemented and committed on the mainline branch |
+| Current HEAD commit | `e58b1bf130807c57289b92f014b2d35ca43ca5ce` | current repo tip after the committed Phase 2 wire-model change set |
 | Phase 0 baseline release | `veritas-lattice-0.1.0-baseline` published | V2 protocol work must continue to preserve the frozen V1 baseline |
 | Existing V2 workspace path | `prototype/gbn-bridge-proto/` exists | Phase 2 should build inside the sibling workspace created in Phase 1 |
-| Current protocol crate state | Phase 2 wire-model modules, tests, and `GBN-ARCH-002` now exist as local worktree changes | the protocol placeholder has been replaced locally and is awaiting commit |
+| Current protocol crate state | Phase 2 wire-model modules, tests, and `GBN-ARCH-002` are committed | the protocol placeholder has been replaced with the canonical M1 Conduit wire model |
 | Canonical M1 descriptor decision | locked in the main execution plan | Phase 2 should not improvise additional descriptor fields |
 | Current protected V1 path drift | none | V1 preservation remained clean through the Phase 2 validation pass |
 | Current validation environment risk | Cargo writes inside the OneDrive-backed V2 workspace may fail with `os error 5` | validation commands may need a temp `--target-dir` workaround to distinguish code issues from environment issues |
@@ -80,13 +80,13 @@ If any gate fails, Phase 2 should stop. The point here is to freeze the wire mod
 
 Current blocker:
 
-- none at the implementation level; remaining work is to commit the Phase 2 code and status-doc updates
+- none; Phase 2 is complete
 
 ### 4.1 Execution Result
 
 Phase 2 replaced the protocol placeholder crate boundary with the canonical M1 Conduit wire model.
 
-Implemented locally:
+Implemented and committed:
 
 - `descriptor.rs` with canonical `BridgeDescriptor`, `ReachabilityClass`, and bridge capabilities
 - `bootstrap.rs` with publisher-seeded bootstrap entries and creator bootstrap responses

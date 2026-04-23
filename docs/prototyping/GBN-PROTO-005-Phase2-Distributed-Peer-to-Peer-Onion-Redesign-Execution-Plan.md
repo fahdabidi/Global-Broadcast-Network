@@ -1,7 +1,7 @@
 # GBN-PROTO-005 - Phase 2 Distributed Peer-to-Peer Onion Redesign - Execution Plan
 
 **Document ID:** GBN-PROTO-005  
-**Status:** Active - Phase 0 complete, Phase 1 complete, Phase 2 implemented locally and validated
+**Status:** Active - Phase 0 complete, Phase 1 complete, Phase 2 complete, Phase 3 implemented locally and validated, Phase 4 implemented locally and validated
 **Last Updated:** 2026-04-22
 **Related Docs:** [GBN-PROTO-005 Plan](GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign.md), [GBN-ARCH-000-V2](../architecture/GBN-ARCH-000-System-Architecture-V2.md), [GBN-ARCH-001-V2](../architecture/GBN-ARCH-001-Media-Creation-Network-V2.md), [GBN-ARCH-002-V2](../architecture/GBN-ARCH-002-Bridge-Protocol-V2.md)
 
@@ -323,7 +323,7 @@ Define the transport, authority, bootstrap, and reachability-repair schemas befo
 
 Phase 2 must lock the canonical M1 wire model so later runtime and authority work do not churn message names or descriptor fields.
 
-Phase 2 is implemented locally and validated against the current plan. The remaining step is to commit the protocol crate, architecture note, and status-document updates before Phase 3 begins.
+Phase 2 is complete. The canonical M1 wire model is committed in `gbn-bridge-protocol` and documented in `GBN-ARCH-002`.
 
 ### 5.2 Files To Create Or Modify
 
@@ -416,7 +416,7 @@ Do not modify the main repo README.md during this phase. Keep README.md pinned t
 
 ### 5.7 Detailed Execution Reference
 
-Use [GBN-PROTO-005-Execution-Phase2-V2-Wire-Model](GBN-PROTO-005-Execution-Phase2-V2-Wire-Model.md) as the implementation checklist and current execution record for this phase. It expands the Phase 2 scope into current repo findings, canonical wire decisions, module-boundary rules, dependency policy, validation fallback strategy, risks, sign-off criteria, and the current local validation results.
+Use [GBN-PROTO-005-Execution-Phase2-V2-Wire-Model](GBN-PROTO-005-Execution-Phase2-V2-Wire-Model.md) as the implementation checklist and completion record for this phase. It expands the Phase 2 scope into current repo findings, canonical wire decisions, module-boundary rules, dependency policy, validation fallback strategy, risks, sign-off criteria, and the executed validation results.
 
 ---
 
@@ -425,6 +425,8 @@ Use [GBN-PROTO-005-Execution-Phase2-V2-Wire-Model](GBN-PROTO-005-Execution-Phase
 ### 6.1 Objective
 
 Implement the publisher-side authority service that signs leases, serves bridge catalogs, and coordinates first-contact bootstrap plus batched punch fanout.
+
+Phase 3 is implemented locally and validated from the committed Phase 2 protocol baseline and the published Lattice preservation baseline. Commit the Phase 3 authority-plane change set before beginning Phase 4.
 
 ### 6.2 Files To Create Or Modify
 
@@ -495,6 +497,10 @@ Do not modify mpub-receiver or any V1 publisher logic. V2 publisher authority mu
 Do not modify the main repo README.md during this phase. Keep README.md pinned to the published Lattice release-facing content, and defer any V2 README updates until all V2 code changes are complete and explicitly approved as a separate documentation pass.
 ```
 
+### 6.7 Detailed Execution Reference
+
+Use [GBN-PROTO-005-Execution-Phase3-V2-Publisher-Authority-Plane](GBN-PROTO-005-Execution-Phase3-V2-Publisher-Authority-Plane.md) as the implementation checklist and execution record for this phase. It expands the Phase 3 scope into current repo findings, authority-boundary rules, bootstrap and batching policy assumptions, dependency limits, validation fallback strategy, risks, sign-off criteria, and the executed validation results.
+
 ---
 
 ## 7. Phase 4 - ExitBridge Runtime
@@ -502,6 +508,8 @@ Do not modify the main repo README.md during this phase. Keep README.md pinned t
 ### 7.1 Objective
 
 Implement the runtime for an authorized ExitBridge node, including Publisher-directed UDP hole punching and seed-bridge bootstrap duties.
+
+Phase 4 is implemented locally and validated against the current Phase 3 authority surface. Commit the combined Conduit Phase 3 and Phase 4 change set before beginning Phase 5.
 
 ### 7.2 Files To Create Or Modify
 
