@@ -25,6 +25,8 @@ frozen V1 Lattice workspace under `prototype/gbn-proto/`.
 | `scripts/deploy-bridge-test.sh` | deploys the V2 CloudFormation stack |
 | `scripts/status-snapshot.sh` | prints stack and ECS service status |
 | `scripts/bootstrap-smoke.sh` | verifies stack wiring and ECS task-definition environment |
+| `scripts/mobile-validation.sh` | runs the Phase 11 local proxy or AWS/mobile validation workflow |
+| `scripts/collect-bridge-metrics.sh` | collects ECS and CloudWatch evidence for a deployed Phase 10/11 stack |
 | `scripts/relay-control-interactive-v2.sh` | small interactive wrapper around status, smoke, and teardown |
 | `scripts/teardown-bridge-test.sh` | deletes only `gbn-bridge-phase2-*` stacks |
 
@@ -47,6 +49,11 @@ infra/scripts/deploy-bridge-test.sh \
   --bridge-image ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/gbn-bridge-proto-exit-bridge:phase10
 
 infra/scripts/bootstrap-smoke.sh \
+  --region us-east-1 \
+  --stack-name gbn-bridge-phase2-dev
+
+infra/scripts/mobile-validation.sh \
+  --mode aws \
   --region us-east-1 \
   --stack-name gbn-bridge-phase2-dev
 ```

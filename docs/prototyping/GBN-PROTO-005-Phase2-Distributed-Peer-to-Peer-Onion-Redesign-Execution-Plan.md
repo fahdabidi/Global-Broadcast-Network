@@ -1,7 +1,7 @@
 # GBN-PROTO-005 - Phase 2 Distributed Peer-to-Peer Onion Redesign - Execution Plan
 
 **Document ID:** GBN-PROTO-005  
-**Status:** Active - Phase 0 complete, Phase 1 complete, Phase 2 complete, Phase 3 complete, Phase 4 complete, Phase 5 complete, Phase 6 complete, Phase 7 complete, Phase 8 complete, Phase 9 complete, Phase 10 implemented locally with AWS deployment validation pending
+**Status:** Active - Phase 0 complete, Phase 1 complete, Phase 2 complete, Phase 3 complete, Phase 4 complete, Phase 5 complete, Phase 6 complete, Phase 7 complete, Phase 8 complete, Phase 9 complete, Phase 10 implemented locally with AWS deployment validation pending, Phase 11 implemented locally with live mobile validation pending
 **Last Updated:** 2026-04-22
 **Related Docs:** [GBN-PROTO-005 Plan](GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign.md), [GBN-ARCH-000-V2](../architecture/GBN-ARCH-000-System-Architecture-V2.md), [GBN-ARCH-001-V2](../architecture/GBN-ARCH-001-Media-Creation-Network-V2.md), [GBN-ARCH-002-V2](../architecture/GBN-ARCH-002-Bridge-Protocol-V2.md)
 
@@ -1043,6 +1043,8 @@ Use [GBN-PROTO-005-Execution-Phase10-V2-AWS-Prototype-Deployment](GBN-PROTO-005-
 
 Validate whether bridge mode actually survives realistic mobile-network conditions, including first-time bootstrap and progressive bridge fanout.
 
+Phase 11 is implemented locally from the committed Phase 10 AWS-prototype baseline. V2-only mobile validation scripts, a mobile scenario matrix, and a current test-results document now exist. The remaining gap is live AWS/mobile measurement of bootstrap, punch, failover, batching, and churn behavior.
+
 ### 14.2 Files To Create Or Modify
 
 Create:
@@ -1105,6 +1107,10 @@ Do not change V1 deployment or validation tooling. This phase is about measuring
 
 Do not modify the main repo README.md during this phase. Keep README.md pinned to the published Lattice release-facing content, and defer any V2 README updates until all V2 code changes are complete and explicitly approved as a separate documentation pass.
 ```
+
+### 14.7 Detailed Execution Reference
+
+Use [GBN-PROTO-005-Execution-Phase11-V2-Mobile-Network-Validation](GBN-PROTO-005-Execution-Phase11-V2-Mobile-Network-Validation.md) as the implementation checklist and current execution record for this phase. It expands the Phase 11 scope into current repo findings, local-vs-live evidence boundaries, validation commands, executed results, and remaining blockers.
 
 ---
 
