@@ -1,0 +1,12 @@
+.git
+.gitignore
+.vscode
+target
+Cargo.lock
+docs
+infra
+test-vectors
+configs
+docker-compose*.yml
+README.md
+**/*.md

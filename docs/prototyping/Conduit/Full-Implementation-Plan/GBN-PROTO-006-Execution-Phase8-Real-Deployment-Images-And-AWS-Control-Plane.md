@@ -1,6 +1,6 @@
 # GBN-PROTO-006 - Execution Phase 8 Detailed Plan: Real Deployment Images And AWS Control Plane
 
-**Status:** Ready to start after Phase 7 distributed `chain_id` trace propagation is implemented and validated  
+**Status:** Implemented locally and partially validated; deployment-artifact revalidation is pending a stable WSL Docker session and a refreshed AWS CLI session
 **Primary Goal:** replace the current placeholder deployment images and partial Phase 10 prototype AWS scaffolding with a real deployable Conduit topology that runs separate Publisher Authority, Publisher Receiver, and bridge services over durable storage and explicit service wiring, while preserving the service and trace boundaries introduced in Phases 1 through 7  
 **Source Plan:** [GBN-PROTO-006 Execution Plan](GBN-PROTO-006-Conduit-Full-Implementation-Execution-Plan.md)  
 **Protected V1 Baseline:** [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline)  
@@ -17,15 +17,15 @@ These findings should drive Phase 8 instead of being rediscovered during impleme
 |---|---|---|
 | Current branch | `main` | Phase 8 should record the mainline commit used to begin the deployment cutover |
 | Current HEAD commit | `2b6d5c5d24e269e96e3fdc820f3f90669607414a` | current committed Conduit baseline still deploys only the prototype topology |
-| Current bridge image | [`Dockerfile.bridge`](../../../prototype/gbn-bridge-proto/Dockerfile.bridge) builds only the `exit-bridge` CLI binary | bridge deployment exists, but only for the prototype runtime surface |
-| Current publisher image | [`Dockerfile.bridge-publisher`](../../../prototype/gbn-bridge-proto/Dockerfile.bridge-publisher) builds one monolithic `bridge-publisher` binary | there are still no separate authority and receiver deployment images |
-| Current local compose topology | [`docker-compose.bridge-smoke.yml`](../../../prototype/gbn-bridge-proto/docker-compose.bridge-smoke.yml) is a BusyBox placeholder stack | proves the current compose surface is smoke-only and not a real distributed topology |
-| Current AWS stack | [`phase2-bridge-stack.yaml`](../../../prototype/gbn-bridge-proto/infra/cloudformation/phase2-bridge-stack.yaml) deploys one publisher ECS service and one bridge ECS service family | the current stack still reflects the earlier prototype phase, not a full Conduit topology |
-| Current persistent store wiring | the current Phase 10 stack has no database, no migration step, and no secrets-backed DSN/config injection | a production-capable control plane cannot run without durable storage wiring |
-| Current service discovery model | the current stack injects one `PublisherEndpoint` string and uses public subnets with public IP assignment | full Conduit needs explicit internal service wiring for authority, receiver, and bridges |
-| Current infra guidance | [`README-infra.md`](../../../prototype/gbn-bridge-proto/infra/README-infra.md) explicitly says the current binaries are "prototype entrypoints" and "do not yet provide a production network service" | the repo already documents the current deployment surface as insufficient |
-| Current infra scripts | existing scripts are still `build-and-push.sh`, `deploy-bridge-test.sh`, `bootstrap-smoke.sh`, `status-snapshot.sh`, and `teardown-bridge-test.sh` for the Phase 10 prototype stack | these should inform, but not define, the full Conduit deployment surface |
-| Current `chain_id` deployment visibility | current images, compose stack, and CloudFormation outputs do not expose a canonical trace-aware service topology | Phase 8 must keep `chain_id` visible in service logs and validation surfaces once the real services are deployed |
+| Current bridge image | [`Dockerfile.bridge`](../../../prototype/gbn-bridge-proto/Dockerfile.bridge) now builds the real `exit-bridge` runtime service binary | the bridge image no longer runs only a placeholder sleep loop |
+| Current publisher images | [`Dockerfile.publisher-authority`](../../../prototype/gbn-bridge-proto/Dockerfile.publisher-authority) and [`Dockerfile.publisher-receiver`](../../../prototype/gbn-bridge-proto/Dockerfile.publisher-receiver) now exist alongside the legacy prototype image | the full implementation now has distinct deployable authority and receiver images |
+| Current local compose topology | [`docker-compose.conduit-e2e.yml`](../../../prototype/gbn-bridge-proto/docker-compose.conduit-e2e.yml) now defines Postgres, authority, receiver, and multiple bridge services | local distributed deployment is no longer represented only by the BusyBox placeholder stack |
+| Current AWS stack | [`conduit-full-stack.yaml`](../../../prototype/gbn-bridge-proto/infra/cloudformation/conduit-full-stack.yaml) now defines separate authority, receiver, bridge, and Postgres resources | the full implementation has a dedicated stack separate from the earlier prototype stack |
+| Current persistent store wiring | authority tasks now accept split Postgres host / port / db / user / password wiring via env + secret injection | the deployment surface no longer depends only on a plain-text DSN env default |
+| Current service discovery model | the full stack now uses a private Cloud Map namespace and distinct authority / receiver URLs | internal service wiring is explicit instead of relying on one publisher endpoint string |
+| Current infra guidance | [`README-infra.md`](../../../prototype/gbn-bridge-proto/infra/README-infra.md) now documents both the prototype and full-implementation surfaces | the repo docs now describe the real deployment topology instead of only the prototype warning |
+| Current infra scripts | `build-and-push-conduit-full.sh`, `deploy-conduit-full.sh`, `smoke-conduit-full.sh`, and `teardown-conduit-full.sh` now exist | the full stack has dedicated operational entrypoints instead of reusing the prototype scripts |
+| Current `chain_id` deployment visibility | receiver proxy logs, bridge-service logs, and smoke outputs now preserve a path to `chain_id` evidence | later live validation can collect trace-bearing outputs from the deployed topology |
 
 ---
 
@@ -84,9 +84,10 @@ Phase 8 should not begin code edits until all of these are checked:
 
 If any gate fails, Phase 8 should stop.
 
-Current blocker:
+Current blockers:
 
-- Phases 1 through 7 are not yet implemented in this full-implementation track, so Phase 8 remains planning-ready only
+- the WSL Docker host became unstable while rerunning the new image builds after the first authority-image pull attempt
+- the local AWS CLI session expired before `aws cloudformation validate-template` could be rerun against the new full-stack template
 
 ---
 
@@ -322,6 +323,18 @@ Expected outcome:
 - protected V1 paths show no drift
 - minimum V1 regression suite remains green
 
+Current implementation result:
+
+- V2 `cargo fmt --all --check` passed
+- V2 `cargo check --workspace` passed
+- V2 `cargo test --workspace` passed
+- the new full-stack scripts passed `bash -n`
+- the new compose file was parsed successfully with `PyYAML` because the current WSL Docker install does not provide `docker compose`
+- the new CloudFormation template was parsed locally with a CloudFormation-tag-tolerant YAML loader
+- protected V1 paths remained clean
+- V1 `cargo check --workspace` and `cargo test -p mcn-router-sim` passed
+- image-build reruns and `aws cloudformation validate-template` are still pending the environment blockers above
+
 ---
 
 ## 11. Acceptance Criteria
@@ -373,3 +386,9 @@ The correct Phase 8 sign-off is not:
 - a placeholder compose topology
 - a monolithic deployment that erases the intended service boundaries
 
+Current sign-off recommendation:
+
+- treat Phase 8 implementation as complete in code and local infra assets
+- rerun the three Docker image builds once the WSL Docker session is stable
+- rerun `aws cloudformation validate-template` once the AWS CLI session is refreshed
+- after those two external validations pass, Phase 8 can be marked fully validated without changing the implementation itself

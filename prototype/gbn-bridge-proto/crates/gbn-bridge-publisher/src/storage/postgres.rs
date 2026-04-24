@@ -24,13 +24,43 @@ pub struct PostgresStorageConfig {
 impl PostgresStorageConfig {
     pub fn from_env() -> StorageResult<Option<Self>> {
         let Ok(connection_string) = env::var("GBN_BRIDGE_POSTGRES_URL") else {
-            return Ok(None);
+            return Self::from_split_env();
         };
 
         let schema = env::var("GBN_BRIDGE_POSTGRES_SCHEMA")
             .unwrap_or_else(|_| "conduit_publisher".to_string());
         SchemaName::parse(&schema)?;
 
+        Ok(Some(Self {
+            connection_string,
+            schema,
+        }))
+    }
+
+    fn from_split_env() -> StorageResult<Option<Self>> {
+        let Ok(host) = env::var("GBN_BRIDGE_POSTGRES_HOST") else {
+            return Ok(None);
+        };
+
+        let port = env::var("GBN_BRIDGE_POSTGRES_PORT").unwrap_or_else(|_| "5432".to_string());
+        let database = env::var("GBN_BRIDGE_POSTGRES_DATABASE")
+            .unwrap_or_else(|_| "veritas_conduit".to_string());
+        let user = env::var("GBN_BRIDGE_POSTGRES_USER").unwrap_or_else(|_| "veritas".to_string());
+        let password = env::var("GBN_BRIDGE_POSTGRES_PASSWORD").map_err(|_| {
+            StorageError::Config(
+                "GBN_BRIDGE_POSTGRES_PASSWORD is required when GBN_BRIDGE_POSTGRES_HOST is set"
+                    .into(),
+            )
+        })?;
+        let sslmode =
+            env::var("GBN_BRIDGE_POSTGRES_SSLMODE").unwrap_or_else(|_| "disable".to_string());
+        let schema = env::var("GBN_BRIDGE_POSTGRES_SCHEMA")
+            .unwrap_or_else(|_| "conduit_publisher".to_string());
+        SchemaName::parse(&schema)?;
+
+        let connection_string = format!(
+            "host={host} port={port} dbname={database} user={user} password={password} sslmode={sslmode}"
+        );
         Ok(Some(Self {
             connection_string,
             schema,

@@ -1,0 +1,19 @@
+FROM rust:1.79 AS builder
+WORKDIR /workspace
+
+COPY Cargo.toml Cargo.toml
+COPY src src
+COPY crates crates
+
+RUN cargo build --release --package gbn-bridge-cli --bin publisher-receiver
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /workspace/target/release/publisher-receiver /usr/local/bin/publisher-receiver
+
+EXPOSE 8081
+
+CMD ["/usr/local/bin/publisher-receiver"]

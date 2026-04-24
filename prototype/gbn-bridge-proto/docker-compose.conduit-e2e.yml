@@ -1,0 +1,80 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: veritas_conduit
+      POSTGRES_USER: veritas
+      POSTGRES_PASSWORD: veritas-dev-password
+    ports:
+      - "5432:5432"
+
+  publisher-authority:
+    build:
+      context: .
+      dockerfile: Dockerfile.publisher-authority
+    depends_on:
+      - postgres
+    environment:
+      GBN_BRIDGE_PUBLISHER_BIND_ADDR: 0.0.0.0:8080
+      GBN_BRIDGE_POSTGRES_HOST: postgres
+      GBN_BRIDGE_POSTGRES_PORT: "5432"
+      GBN_BRIDGE_POSTGRES_DATABASE: veritas_conduit
+      GBN_BRIDGE_POSTGRES_USER: veritas
+      GBN_BRIDGE_POSTGRES_PASSWORD: veritas-dev-password
+      GBN_BRIDGE_POSTGRES_SCHEMA: conduit_publisher
+      GBN_BRIDGE_PUBLISHER_SIGNING_MODE: hex
+      GBN_BRIDGE_PUBLISHER_SIGNING_KEY_HEX: 0909090909090909090909090909090909090909090909090909090909090909
+    ports:
+      - "8080:8080"
+
+  publisher-receiver:
+    build:
+      context: .
+      dockerfile: Dockerfile.publisher-receiver
+    depends_on:
+      - publisher-authority
+    environment:
+      GBN_BRIDGE_RECEIVER_BIND_ADDR: 0.0.0.0:8081
+      GBN_BRIDGE_AUTHORITY_URL: http://publisher-authority:8080
+    ports:
+      - "8081:8081"
+
+  exit-bridge-a:
+    build:
+      context: .
+      dockerfile: Dockerfile.bridge
+    depends_on:
+      - publisher-authority
+      - publisher-receiver
+    environment:
+      GBN_BRIDGE_NODE_ID: exit-bridge-a
+      GBN_BRIDGE_INGRESS_HOST: exit-bridge-a
+      GBN_BRIDGE_AUTHORITY_URL: http://publisher-authority:8080
+      GBN_BRIDGE_RECEIVER_URL: http://publisher-receiver:8081
+      GBN_BRIDGE_CONTROL_URL: ws://publisher-authority:8080/v1/bridge/control
+      GBN_BRIDGE_BRIDGE_SIGNING_SEED_HEX: 1111111111111111111111111111111111111111111111111111111111111111
+      GBN_BRIDGE_PUBLISHER_SIGNING_KEY_HEX: 0909090909090909090909090909090909090909090909090909090909090909
+      GBN_BRIDGE_REACHABILITY_CLASS: direct
+      GBN_BRIDGE_PUNCH_PORT: "443"
+      GBN_BRIDGE_CONTROL_KEEPALIVE_INTERVAL_MS: "5000"
+      GBN_BRIDGE_POLL_INTERVAL_MS: "250"
+
+  exit-bridge-b:
+    build:
+      context: .
+      dockerfile: Dockerfile.bridge
+    depends_on:
+      - publisher-authority
+      - publisher-receiver
+    environment:
+      GBN_BRIDGE_NODE_ID: exit-bridge-b
+      GBN_BRIDGE_INGRESS_HOST: exit-bridge-b
+      GBN_BRIDGE_AUTHORITY_URL: http://publisher-authority:8080
+      GBN_BRIDGE_RECEIVER_URL: http://publisher-receiver:8081
+      GBN_BRIDGE_CONTROL_URL: ws://publisher-authority:8080/v1/bridge/control
+      GBN_BRIDGE_BRIDGE_SIGNING_SEED_HEX: 2222222222222222222222222222222222222222222222222222222222222222
+      GBN_BRIDGE_PUBLISHER_SIGNING_KEY_HEX: 0909090909090909090909090909090909090909090909090909090909090909
+      GBN_BRIDGE_REACHABILITY_CLASS: direct
+      GBN_BRIDGE_PUNCH_PORT: "443"
+      GBN_BRIDGE_CONTROL_KEEPALIVE_INTERVAL_MS: "5000"
+      GBN_BRIDGE_POLL_INTERVAL_MS: "250"
