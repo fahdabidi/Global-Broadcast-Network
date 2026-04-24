@@ -1,6 +1,6 @@
 # GBN-PROTO-006 - Execution Phase 3 Detailed Plan: Bridge Control Sessions And Command Delivery
 
-**Status:** Ready to start after Phase 2 durable publisher storage and recovery is implemented and validated  
+**Status:** Implemented locally on 2026-04-23; Phase 3-specific validation passed, but full phase sign-off is blocked in the current environment because the Postgres-backed Phase 2 persistence test backend is unavailable
 **Primary Goal:** implement real authenticated long-lived bridge-to-publisher control sessions so the Publisher can actively deliver bootstrap seed assignments, fanout assignments, punch directives, revocations, and refresh notifications over a real network boundary, while preserving the Phase 1 authority API and the Phase 2 durable state model  
 **Source Plan:** [GBN-PROTO-006 Execution Plan](GBN-PROTO-006-Conduit-Full-Implementation-Execution-Plan.md)  
 **Protected V1 Baseline:** [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline)  
@@ -92,7 +92,7 @@ If any gate fails, Phase 3 should stop.
 
 Current blocker:
 
-- Phases 1 and 2 are not yet implemented, so Phase 3 remains planning-ready only
+- none at the code level; the implementation is complete locally, but full workspace validation in this shell is blocked because no Postgres test backend is reachable at `127.0.0.1:5432`
 
 ---
 
@@ -371,6 +371,16 @@ Expected outcome:
 
 Note: `InProcessPublisherClient` may still exist elsewhere until Phase 4, but Phase 3 should prove that bridge command delivery no longer depends on it in the bridge control path.
 
+Recorded Phase 3 execution notes:
+
+- `cargo fmt --all --check --manifest-path prototype/gbn-bridge-proto/Cargo.toml` passed
+- `cargo check --workspace --manifest-path prototype/gbn-bridge-proto/Cargo.toml --target-dir %LOCALAPPDATA%\\Temp\\veritas-proto006-phase3-target` passed
+- `cargo test -p gbn-bridge-publisher --test control_dispatch --manifest-path prototype/gbn-bridge-proto/Cargo.toml --target-dir %LOCALAPPDATA%\\Temp\\veritas-proto006-phase3-target` passed
+- `cargo test -p gbn-bridge-runtime --test control_session --manifest-path prototype/gbn-bridge-proto/Cargo.toml --target-dir %LOCALAPPDATA%\\Temp\\veritas-proto006-phase3-target` passed
+- protected V1 path diff was empty
+- V1 `cargo check --workspace` and `cargo test -p mcn-router-sim` both passed
+- full V2 `cargo test --workspace` was blocked only by the existing Phase 2 Postgres-backed test `gbn-bridge-publisher/tests/persistence_flow.rs`, which could not connect because no Postgres backend was reachable at `127.0.0.1:5432` from this shell
+
 ---
 
 ## 11. Acceptance Criteria
@@ -386,7 +396,7 @@ Phase 3 is complete when:
 - bridges ACK commands explicitly
 - reconnect and resume behavior is implemented and tested
 - `chain_id` is present and preserved on command and progress paths
-- all required V1 and V2 validation commands have been run and recorded
+- all required V1 and V2 validation commands have been run and recorded, including the existing Postgres-backed persistence test from Phase 2
 
 Phase 3 is not complete if:
 

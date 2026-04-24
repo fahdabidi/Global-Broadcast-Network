@@ -82,6 +82,7 @@ pub fn begin_bootstrap(
     publisher_pub: &PublicKeyBytes,
     config: &AuthorityConfig,
     policy: &AuthorityPolicy,
+    chain_id: &str,
     request: CreatorJoinRequest,
     now_ms: u64,
 ) -> AuthorityResult<AuthorityBootstrapPlan> {
@@ -137,6 +138,7 @@ pub fn begin_bootstrap(
         bootstrap_session_id.clone(),
         BootstrapSessionRecord {
             bootstrap_session_id: bootstrap_session_id.clone(),
+            chain_id: chain_id.to_string(),
             creator_entry: creator_entry.clone(),
             host_creator_id: request.host_creator_id,
             relay_bridge_id: request.relay_bridge_id,

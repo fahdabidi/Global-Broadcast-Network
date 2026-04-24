@@ -7,6 +7,7 @@ pub mod bridge;
 pub mod bridge_pool;
 pub mod catalog_cache;
 pub mod chunk_sender;
+pub mod control_client;
 pub mod creator;
 pub mod creator_listener;
 pub mod discovery;
@@ -40,6 +41,7 @@ pub use bridge::{ExitBridgeConfig, ExitBridgeRuntime};
 pub use bridge_pool::{BridgePool, BridgePoolEntry};
 pub use catalog_cache::CatalogCache;
 pub use chunk_sender::{ChunkSender, ChunkSenderConfig, UploadResult};
+pub use control_client::BridgeControlClient;
 pub use creator::{CreatorConfig, CreatorRuntime};
 pub use creator_listener::CreatorListener;
 pub use discovery::{DiscoveryHint, DiscoveryHintSource, WeakDiscoveryConfig, WeakDiscoveryState};
@@ -167,6 +169,18 @@ pub enum RuntimeError {
 
     #[error("bridge ACK rejected session `{session_id}` sequence `{sequence}`")]
     RejectedBridgeAck { session_id: String, sequence: u32 },
+
+    #[error("bridge runtime has no attached control client")]
+    MissingControlClient,
+
+    #[error("control transport error during {operation}: {detail}")]
+    ControlTransport {
+        operation: &'static str,
+        detail: String,
+    },
+
+    #[error("control protocol error: {detail}")]
+    ControlProtocol { detail: String },
 
     #[error(transparent)]
     Authority(#[from] AuthorityError),

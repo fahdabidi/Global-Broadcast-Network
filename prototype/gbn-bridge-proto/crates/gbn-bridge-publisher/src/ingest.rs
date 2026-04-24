@@ -89,6 +89,7 @@ pub fn ingest_frame(
         frame.sequence,
         IngestedFrameRecord {
             via_bridge_id: via_bridge_id.to_string(),
+            chain_id: session.chain_id.clone(),
             frame: frame.clone(),
             received_at_ms,
         },

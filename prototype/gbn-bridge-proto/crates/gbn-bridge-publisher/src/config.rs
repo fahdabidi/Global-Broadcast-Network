@@ -6,6 +6,8 @@ pub struct PublisherServiceConfig {
     pub auth_max_skew_ms: u64,
     pub replay_ttl_ms: u64,
     pub request_max_bytes: usize,
+    pub control_heartbeat_interval_ms: u64,
+    pub control_idle_timeout_ms: u64,
 }
 
 impl Default for PublisherServiceConfig {
@@ -15,6 +17,8 @@ impl Default for PublisherServiceConfig {
             auth_max_skew_ms: 30_000,
             replay_ttl_ms: 300_000,
             request_max_bytes: 1_048_576,
+            control_heartbeat_interval_ms: 5_000,
+            control_idle_timeout_ms: 30_000,
         }
     }
 }
@@ -26,6 +30,11 @@ impl PublisherServiceConfig {
             auth_max_skew_ms: parse_env_u64("GBN_BRIDGE_AUTH_MAX_SKEW_MS", 30_000)?,
             replay_ttl_ms: parse_env_u64("GBN_BRIDGE_REPLAY_TTL_MS", 300_000)?,
             request_max_bytes: parse_env_usize("GBN_BRIDGE_REQUEST_MAX_BYTES", 1_048_576)?,
+            control_heartbeat_interval_ms: parse_env_u64(
+                "GBN_BRIDGE_CONTROL_HEARTBEAT_INTERVAL_MS",
+                5_000,
+            )?,
+            control_idle_timeout_ms: parse_env_u64("GBN_BRIDGE_CONTROL_IDLE_TIMEOUT_MS", 30_000)?,
         })
     }
 

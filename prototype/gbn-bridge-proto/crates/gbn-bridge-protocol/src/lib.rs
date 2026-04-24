@@ -2,6 +2,7 @@
 
 pub mod bootstrap;
 pub mod catalog;
+pub mod control;
 pub mod descriptor;
 pub mod error;
 pub mod lease;
@@ -18,6 +19,12 @@ pub use bootstrap::{
 pub use catalog::{
     BridgeCatalogRequest, BridgeCatalogResponse, BridgeCatalogResponseUnsigned, BridgeRefreshHint,
     RefreshHintReason,
+};
+pub use control::{
+    BridgeCommandAck, BridgeCommandAckStatus, BridgeCommandPayload, BridgeControlCommand,
+    BridgeControlError, BridgeControlFrame, BridgeControlHello, BridgeControlHelloUnsigned,
+    BridgeControlKeepalive, BridgeControlProgress, BridgeControlWelcome,
+    BridgeControlWelcomeUnsigned,
 };
 pub use descriptor::{
     BridgeCapability, BridgeDescriptor, BridgeDescriptorUnsigned, BridgeIngressEndpoint,

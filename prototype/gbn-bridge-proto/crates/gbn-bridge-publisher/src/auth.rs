@@ -5,6 +5,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::api::AuthorityApiRequest;
+use gbn_bridge_protocol::BridgeControlHello;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AuthError {
@@ -118,6 +119,35 @@ impl RequestAuthenticator {
             });
         }
 
+        Ok(())
+    }
+
+    pub fn verify_bridge_control_hello(
+        &mut self,
+        hello: &BridgeControlHello,
+        now_ms: u64,
+    ) -> Result<(), AuthError> {
+        if hello.chain_id.trim().is_empty() {
+            return Err(AuthError::EmptyChainId);
+        }
+        if hello.request_id.trim().is_empty() {
+            return Err(AuthError::EmptyRequestId);
+        }
+        if hello.bridge_id.trim().is_empty() {
+            return Err(AuthError::EmptyActorId);
+        }
+
+        self.reap(now_ms);
+
+        if self.seen_requests.contains_key(&hello.request_id) {
+            return Err(AuthError::ReplayDetected {
+                request_id: hello.request_id.clone(),
+            });
+        }
+
+        hello.verify_bridge(now_ms, self.max_skew_ms)?;
+        self.seen_requests
+            .insert(hello.request_id.clone(), hello.sent_at_ms);
         Ok(())
     }
 

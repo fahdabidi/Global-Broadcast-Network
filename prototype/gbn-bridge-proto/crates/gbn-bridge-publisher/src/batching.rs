@@ -19,6 +19,7 @@ pub fn enqueue_join_request(
     signing_key: &SigningKey,
     config: &AuthorityConfig,
     policy: &AuthorityPolicy,
+    chain_id: Option<&str>,
     request: CreatorJoinRequest,
     now_ms: u64,
 ) -> AuthorityResult<Option<FinalizedBatch>> {
@@ -44,6 +45,7 @@ pub fn enqueue_join_request(
     let creator_entry = creator_bootstrap_entry(&request, signing_key, config, now_ms)?;
     let pending = PendingBatchAssignment {
         bootstrap_session_id: storage.next_bootstrap_id(),
+        chain_id: chain_id.map(ToOwned::to_owned),
         join_request: request,
         creator_entry,
     };

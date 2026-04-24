@@ -11,6 +11,7 @@ use crate::api::{
     AuthorityApiRequest, AuthorityRoute, BootstrapJoinBody, BootstrapProgressBody,
     BridgeHeartbeatBody, BridgeRegisterBody, CreatorCatalogBody,
 };
+use crate::control::{handle_control_connection, looks_like_control_upgrade};
 use crate::service::{AuthorityService, ServiceError};
 
 pub struct AuthorityHttpServer {
@@ -59,7 +60,13 @@ impl AuthorityHttpServer {
         self.listener.set_nonblocking(false)?;
         loop {
             let (stream, _) = self.listener.accept()?;
-            handle_connection(stream, &self.service, self.request_max_bytes)?;
+            let service = Arc::clone(&self.service);
+            let request_max_bytes = self.request_max_bytes;
+            thread::spawn(move || {
+                if let Err(error) = handle_connection(stream, &service, request_max_bytes) {
+                    eprintln!("authority connection error: {error}");
+                }
+            });
         }
     }
 
@@ -72,7 +79,13 @@ impl AuthorityHttpServer {
 
             match self.listener.accept() {
                 Ok((stream, _)) => {
-                    handle_connection(stream, &self.service, self.request_max_bytes)?
+                    let service = Arc::clone(&self.service);
+                    let request_max_bytes = self.request_max_bytes;
+                    thread::spawn(move || {
+                        if let Err(error) = handle_connection(stream, &service, request_max_bytes) {
+                            eprintln!("authority connection error: {error}");
+                        }
+                    });
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(10));
@@ -108,6 +121,11 @@ fn handle_connection(
     service: &Arc<Mutex<AuthorityService>>,
     request_max_bytes: usize,
 ) -> io::Result<()> {
+    stream.set_nonblocking(false)?;
+    if looks_like_control_upgrade(&stream)? {
+        return handle_control_connection(stream, service);
+    }
+
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
 

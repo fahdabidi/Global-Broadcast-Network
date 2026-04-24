@@ -2,6 +2,7 @@
 
 pub mod ack;
 pub mod api;
+pub mod assignment;
 pub mod auth;
 pub mod authority;
 pub mod batching;
@@ -9,6 +10,8 @@ pub mod bootstrap;
 pub mod bridge_scoring;
 pub mod catalog;
 pub mod config;
+pub mod control;
+pub mod dispatcher;
 pub mod http;
 pub mod ingest;
 pub mod lease;
@@ -18,6 +21,7 @@ pub mod punch;
 pub mod registry;
 pub mod server;
 pub mod service;
+pub mod signing;
 pub mod storage;
 
 use gbn_bridge_protocol::{ProtocolError, DEFAULT_UDP_PUNCH_PORT};
@@ -37,9 +41,13 @@ pub use config::PublisherServiceConfig;
 pub use metrics::{AuthorityMetrics, AuthorityMetricsSnapshot};
 pub use server::{AuthorityServer, AuthorityServerHandle, BoundAuthorityServer};
 pub use service::{AuthorityService, ServiceError};
+pub use signing::PublisherSigningSource;
 pub use storage::{
-    BatchWindowState, BootstrapSessionRecord, BridgeRecord, InMemoryAuthorityStorage,
-    IngestedFrameRecord, UploadSessionRecord,
+    postgres::{PostgresAuthorityStorage, PostgresStorageConfig},
+    recovery::RecoverySummary,
+    BatchWindowState, BootstrapSessionRecord, BridgeCommandRecord, BridgeRecord,
+    CatalogIssuanceRecord, InMemoryAuthorityStorage, IngestedFrameRecord, SequenceState,
+    StorageError, UploadSessionRecord,
 };
 
 pub type AuthorityResult<T> = Result<T, AuthorityError>;
@@ -89,6 +97,12 @@ pub enum AuthorityError {
     #[error("bootstrap session `{bootstrap_session_id}` not found")]
     BootstrapSessionNotFound { bootstrap_session_id: String },
 
+    #[error("bridge command `{command_id}` for bridge `{bridge_id}` not found")]
+    BridgeCommandNotFound {
+        bridge_id: String,
+        command_id: String,
+    },
+
     #[error("upload session `{session_id}` not found")]
     UploadSessionNotFound { session_id: String },
 
@@ -101,6 +115,16 @@ pub enum AuthorityError {
 
     #[error("upload session `{session_id}` is already closed")]
     UploadSessionClosed { session_id: String },
+
+    #[error("chain_id mismatch for {context}: expected `{expected}`, got `{actual}`")]
+    ChainIdMismatch {
+        context: &'static str,
+        expected: String,
+        actual: String,
+    },
+
+    #[error(transparent)]
+    Storage(#[from] StorageError),
 
     #[error(transparent)]
     Protocol(#[from] ProtocolError),

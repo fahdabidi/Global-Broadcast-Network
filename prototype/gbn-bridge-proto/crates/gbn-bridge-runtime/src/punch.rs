@@ -41,6 +41,10 @@ impl PunchManager {
         self.attempts.len()
     }
 
+    pub fn active_attempt(&self, bootstrap_session_id: &str) -> Option<&ActivePunchAttempt> {
+        self.attempts.get(bootstrap_session_id)
+    }
+
     pub fn begin_from_instruction(
         &mut self,
         source: &PunchSource,

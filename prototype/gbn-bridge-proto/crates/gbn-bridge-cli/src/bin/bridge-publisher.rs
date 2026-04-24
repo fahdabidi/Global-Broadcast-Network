@@ -1,5 +1,9 @@
-use ed25519_dalek::SigningKey;
-use gbn_bridge_publisher::{AuthorityServer, PublisherAuthority, PublisherServiceConfig};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use gbn_bridge_publisher::{
+    AuthorityConfig, AuthorityPolicy, AuthorityServer, PostgresStorageConfig, PublisherAuthority,
+    PublisherServiceConfig, PublisherSigningSource,
+};
 
 fn main() {
     if let Err(error) = run() {
@@ -10,8 +14,20 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let config = PublisherServiceConfig::from_env()?;
-    let signing_key = publisher_signing_key_from_env()?;
-    let authority = PublisherAuthority::new(signing_key);
+    let signing_key = PublisherSigningSource::from_env()
+        .and_then(|source| source.load_signing_key())
+        .map_err(|error| error.to_string())?;
+    let authority = match PostgresStorageConfig::from_env().map_err(|error| error.to_string())? {
+        Some(postgres_config) => PublisherAuthority::with_postgres(
+            signing_key,
+            AuthorityConfig::default(),
+            AuthorityPolicy::default(),
+            postgres_config,
+            now_ms(),
+        )
+        .map_err(|error| error.to_string())?,
+        None => PublisherAuthority::new(signing_key),
+    };
     let server = AuthorityServer::new(authority, config);
     let bound = server.bind().map_err(|error| error.to_string())?;
     println!(
@@ -21,37 +37,9 @@ fn run() -> Result<(), String> {
     bound.serve_forever().map_err(|error| error.to_string())
 }
 
-fn publisher_signing_key_from_env() -> Result<SigningKey, String> {
-    match std::env::var("GBN_BRIDGE_PUBLISHER_SIGNING_KEY_HEX") {
-        Ok(value) => {
-            let bytes = decode_hex_32(&value)?;
-            Ok(SigningKey::from_bytes(&bytes))
-        }
-        Err(_) => {
-            eprintln!(
-                "GBN_BRIDGE_PUBLISHER_SIGNING_KEY_HEX is not set; using the default development publisher key"
-            );
-            Ok(SigningKey::from_bytes(&[9_u8; 32]))
-        }
-    }
-}
-
-fn decode_hex_32(value: &str) -> Result<[u8; 32], String> {
-    let trimmed = value.trim();
-    if trimmed.len() != 64 {
-        return Err(format!(
-            "GBN_BRIDGE_PUBLISHER_SIGNING_KEY_HEX must contain 64 hex characters, got {}",
-            trimmed.len()
-        ));
-    }
-
-    let mut bytes = [0_u8; 32];
-    for (index, chunk) in trimmed.as_bytes().chunks(2).enumerate() {
-        let pair = std::str::from_utf8(chunk)
-            .map_err(|_| "publisher signing key hex must be valid utf-8".to_string())?;
-        bytes[index] = u8::from_str_radix(pair, 16)
-            .map_err(|_| format!("invalid publisher signing key hex byte {pair:?}"))?;
-    }
-
-    Ok(bytes)
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after unix epoch")
+        .as_millis() as u64
 }

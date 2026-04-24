@@ -1,6 +1,6 @@
 # GBN-PROTO-006 - Execution Phase 2 Detailed Plan: Durable Publisher Storage And Recovery
 
-**Status:** Ready to start after Phase 1 real authority API service is implemented and validated  
+**Status:** Completed and validated locally on 2026-04-23
 **Primary Goal:** replace `gbn-bridge-publisher`'s in-memory production authority state with durable Postgres-backed storage, restart recovery, and production signing-key loading while preserving the Phase 1 service boundary and keeping bridge control sessions and deployment promotion deferred to later phases  
 **Source Plan:** [GBN-PROTO-006 Execution Plan](GBN-PROTO-006-Conduit-Full-Implementation-Execution-Plan.md)  
 **Protected V1 Baseline:** [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline)  
@@ -97,7 +97,7 @@ If any gate fails, Phase 2 should stop.
 
 Current blocker:
 
-- Phase 1 is not yet implemented, so Phase 2 remains planning-ready only
+- none; the durable Postgres-backed authority path, restart recovery, and signing-key loader abstraction are now implemented locally and validated
 
 ---
 
@@ -393,6 +393,13 @@ Expected outcome:
 - minimum V1 regression suite remains green
 
 If local Postgres-backed tests require Docker or WSL services, record that prerequisite explicitly. Do not silently downgrade Phase 2 validation to unit tests only.
+
+Recorded Phase 2 execution notes:
+
+- V2 validation used the temp target fallback at `%LOCALAPPDATA%\Temp\veritas-proto006-phase2-target`
+- the Postgres-backed restart test ran against a local WSL Docker container named `veritas-proto006-pg`
+- protected V1 path diff was empty
+- V1 `cargo check --workspace` and `cargo test -p mcn-router-sim` both passed
 
 ---
 

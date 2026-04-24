@@ -1,11 +1,16 @@
+use std::collections::BTreeMap;
+
 use gbn_bridge_protocol::{
-    BootstrapDhtEntry, BootstrapProgressStage, BridgeAck, BridgeCapability, BridgeClose,
-    BridgeData, BridgeIngressEndpoint, BridgeLease, BridgeOpen, BridgePunchAck, BridgePunchProbe,
-    BridgePunchStart, BridgeRegister, BridgeSetRequest, BridgeSetResponse, ReachabilityClass,
+    BootstrapDhtEntry, BootstrapProgressStage, BridgeAck, BridgeBatchAssign, BridgeCapability,
+    BridgeCatalogResponse, BridgeClose, BridgeCommandAckStatus, BridgeCommandPayload,
+    BridgeControlCommand, BridgeData, BridgeIngressEndpoint, BridgeLease, BridgeOpen,
+    BridgePunchAck, BridgePunchProbe, BridgePunchStart, BridgeRegister, BridgeRevoke,
+    BridgeSetRequest, BridgeSetResponse, ReachabilityClass,
 };
 use gbn_bridge_publisher::{AuthorityBootstrapPlan, AuthorityError};
 
 use crate::bootstrap_bridge::BootstrapBridgeState;
+use crate::control_client::BridgeControlClient;
 use crate::creator_listener::CreatorListener;
 use crate::forwarder::PayloadForwarder;
 use crate::heartbeat_loop::HeartbeatLoop;
@@ -49,6 +54,11 @@ pub struct ExitBridgeRuntime {
     progress_reporter: ProgressReporter,
     forwarder: PayloadForwarder,
     data_sessions: BridgeSessionRegistry,
+    control_client: Option<BridgeControlClient>,
+    bootstrap_chain_ids: BTreeMap<String, String>,
+    pending_batch_assignments: Vec<BridgeBatchAssign>,
+    received_catalog_refreshes: Vec<BridgeCatalogResponse>,
+    last_revocation: Option<BridgeRevoke>,
     registered_reachability_class: Option<ReachabilityClass>,
 }
 
@@ -65,6 +75,11 @@ impl ExitBridgeRuntime {
             progress_reporter: ProgressReporter::default(),
             forwarder: PayloadForwarder::default(),
             data_sessions: BridgeSessionRegistry::default(),
+            control_client: None,
+            bootstrap_chain_ids: BTreeMap::new(),
+            pending_batch_assignments: Vec::new(),
+            received_catalog_refreshes: Vec::new(),
+            last_revocation: None,
             registered_reachability_class: None,
         }
     }
@@ -81,12 +96,36 @@ impl ExitBridgeRuntime {
         &mut self.publisher_client
     }
 
+    pub fn attach_control_client(&mut self, client: BridgeControlClient) {
+        self.control_client = Some(client);
+    }
+
+    pub fn control_client(&self) -> Option<&BridgeControlClient> {
+        self.control_client.as_ref()
+    }
+
+    pub fn pending_batch_assignments(&self) -> &[BridgeBatchAssign] {
+        &self.pending_batch_assignments
+    }
+
+    pub fn received_catalog_refreshes(&self) -> &[BridgeCatalogResponse] {
+        &self.received_catalog_refreshes
+    }
+
+    pub fn last_revocation(&self) -> Option<&BridgeRevoke> {
+        self.last_revocation.as_ref()
+    }
+
     pub fn lease_state(&self) -> &LeaseState {
         &self.lease_state
     }
 
     pub fn current_lease(&self) -> Option<&BridgeLease> {
         self.lease_state.current()
+    }
+
+    pub fn apply_remote_lease(&mut self, lease: BridgeLease, now_ms: u64) {
+        self.apply_lease(lease, now_ms);
     }
 
     pub fn ingress_is_exposed(&mut self, now_ms: u64) -> bool {
@@ -104,6 +143,13 @@ impl ExitBridgeRuntime {
 
     pub fn active_data_session_count(&self) -> usize {
         self.data_sessions.active_session_count()
+    }
+
+    pub fn active_punch_attempt(
+        &self,
+        bootstrap_session_id: &str,
+    ) -> Option<&crate::punch::ActivePunchAttempt> {
+        self.punch_manager.active_attempt(bootstrap_session_id)
     }
 
     pub fn startup(
@@ -231,14 +277,18 @@ impl ExitBridgeRuntime {
         } else {
             BootstrapProgressStage::BridgeTunnelEstablished
         };
-        self.progress_reporter.report(
-            &mut self.publisher_client,
-            &self.config.bridge_id,
-            bootstrap_session_id,
-            stage,
-            1,
-            established_at_ms,
-        );
+        if self.control_client.is_some() {
+            self.report_progress_control_path(bootstrap_session_id, stage, 1, established_at_ms)?;
+        } else {
+            self.progress_reporter.report(
+                &mut self.publisher_client,
+                &self.config.bridge_id,
+                bootstrap_session_id,
+                stage,
+                1,
+                established_at_ms,
+            );
+        }
 
         Ok(ack)
     }
@@ -253,14 +303,23 @@ impl ExitBridgeRuntime {
             &self.publisher_client.publisher_public_key(),
             now_ms,
         )?;
-        self.progress_reporter.report(
-            &mut self.publisher_client,
-            &self.config.bridge_id,
-            &request.bootstrap_session_id,
-            BootstrapProgressStage::SeedPayloadReceived,
-            response.bridge_entries.len() as u16,
-            now_ms,
-        );
+        if self.control_client.is_some() {
+            self.report_progress_control_path(
+                &request.bootstrap_session_id,
+                BootstrapProgressStage::SeedPayloadReceived,
+                response.bridge_entries.len() as u16,
+                now_ms,
+            )?;
+        } else {
+            self.progress_reporter.report(
+                &mut self.publisher_client,
+                &self.config.bridge_id,
+                &request.bootstrap_session_id,
+                BootstrapProgressStage::SeedPayloadReceived,
+                response.bridge_entries.len() as u16,
+                now_ms,
+            );
+        }
         Ok(response)
     }
 
@@ -347,5 +406,112 @@ impl ExitBridgeRuntime {
             source_ip_addr: self.config.ingress_endpoint.host.clone(),
             source_udp_punch_port,
         }
+    }
+
+    pub fn receive_next_control_command(
+        &mut self,
+        now_ms: u64,
+    ) -> RuntimeResult<Option<gbn_bridge_protocol::BridgeCommandAck>> {
+        if self.control_client.is_none() {
+            return Err(RuntimeError::MissingControlClient);
+        }
+        let command = {
+            let client = self
+                .control_client
+                .as_mut()
+                .expect("control client should exist");
+            client.receive_command(now_ms)?
+        };
+        let Some(command) = command else {
+            return Ok(None);
+        };
+        let status = self.apply_control_command(&command, now_ms)?;
+        let ack = self
+            .control_client
+            .as_mut()
+            .expect("control client should exist")
+            .acknowledge_command(&command, status, now_ms)?;
+        Ok(Some(ack))
+    }
+
+    pub fn send_control_keepalive(&mut self, now_ms: u64) -> RuntimeResult<()> {
+        let Some(client) = self.control_client.as_mut() else {
+            return Err(RuntimeError::MissingControlClient);
+        };
+        client.send_keepalive(now_ms)
+    }
+
+    fn apply_control_command(
+        &mut self,
+        command: &BridgeControlCommand,
+        now_ms: u64,
+    ) -> RuntimeResult<BridgeCommandAckStatus> {
+        match &command.payload {
+            BridgeCommandPayload::PunchStart(payload) => {
+                self.bootstrap_chain_ids.insert(
+                    payload.bootstrap_session_id.clone(),
+                    command.chain_id.clone(),
+                );
+                self.begin_publisher_directed_punch(payload.clone(), now_ms)?;
+                Ok(BridgeCommandAckStatus::Applied)
+            }
+            BridgeCommandPayload::BatchAssign(payload) => {
+                if payload.bridge_id != self.config.bridge_id {
+                    return Err(RuntimeError::UnexpectedBridgeRuntime {
+                        expected_bridge_id: self.config.bridge_id.clone(),
+                        actual_bridge_id: payload.bridge_id.clone(),
+                    });
+                }
+                for assignment in &payload.assignments {
+                    self.bootstrap_chain_ids.insert(
+                        assignment.bootstrap_session_id.clone(),
+                        command.chain_id.clone(),
+                    );
+                }
+                self.pending_batch_assignments.push(payload.clone());
+                Ok(BridgeCommandAckStatus::Applied)
+            }
+            BridgeCommandPayload::Revoke(payload) => {
+                if payload.bridge_id != self.config.bridge_id {
+                    return Err(RuntimeError::UnexpectedBridgeRuntime {
+                        expected_bridge_id: self.config.bridge_id.clone(),
+                        actual_bridge_id: payload.bridge_id.clone(),
+                    });
+                }
+                self.lease_state.clear();
+                self.creator_listener.disable(now_ms);
+                self.last_revocation = Some(payload.clone());
+                Ok(BridgeCommandAckStatus::Applied)
+            }
+            BridgeCommandPayload::CatalogRefresh(payload) => {
+                self.received_catalog_refreshes.push(payload.clone());
+                Ok(BridgeCommandAckStatus::Applied)
+            }
+        }
+    }
+
+    fn report_progress_control_path(
+        &mut self,
+        bootstrap_session_id: &str,
+        stage: BootstrapProgressStage,
+        active_bridge_count: u16,
+        reported_at_ms: u64,
+    ) -> RuntimeResult<()> {
+        let Some(chain_id) = self.bootstrap_chain_ids.get(bootstrap_session_id).cloned() else {
+            return Ok(());
+        };
+        let Some(control_client) = self.control_client.as_mut() else {
+            return Ok(());
+        };
+        control_client.send_progress(
+            &chain_id,
+            gbn_bridge_protocol::BootstrapProgress {
+                bootstrap_session_id: bootstrap_session_id.to_string(),
+                reporter_id: self.config.bridge_id.clone(),
+                stage,
+                active_bridge_count,
+                reported_at_ms,
+            },
+        )
     }
 }
