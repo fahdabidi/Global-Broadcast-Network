@@ -1,7 +1,7 @@
 # GBN-PROTO-006 - Conduit Full Implementation - Execution Plan
 
 **Document ID:** GBN-PROTO-006  
-**Status:** Draft - Phase 0 complete, Phase 1 complete, Phase 2 complete, Phase 3 complete, Phase 4 complete, Phase 5 complete, Phase 6 complete, Phase 7 complete, Phase 8 implementation complete with external deployment revalidation deferred to Phase 10, Phase 9 complete, Phase 10 implemented locally with live AWS/mobile evidence pending
+**Status:** Draft - Phase 0 complete, Phase 1 complete, Phase 2 complete, Phase 3 complete, Phase 4 complete, Phase 5 complete, Phase 6 complete, Phase 7 complete, Phase 8 implementation complete with external deployment revalidation deferred to Phase 10, Phase 9 complete, Phase 10 implemented locally with minimal AWS smoke evidence captured and full mobile-carrier evidence pending
 **Last Updated:** 2026-04-24
 **Related Docs:** [GBN-PROTO-005 Execution Plan](GBN-PROTO-005-Phase2-Distributed-Peer-to-Peer-Onion-Redesign-Execution-Plan.md), [GBN-ARCH-000-V2](../architecture/GBN-ARCH-000-System-Architecture-V2.md), [GBN-ARCH-001-V2](../architecture/GBN-ARCH-001-Media-Creation-Network-V2.md), [GBN-ARCH-002-V2](../architecture/GBN-ARCH-002-Bridge-Protocol-V2.md)
 
@@ -918,6 +918,13 @@ May modify:
 - live data-path and ACK measurements
 - live batch-window behavior measurements
 - live `chain_id` correlation evidence across authority, bridges, receiver, and validation scripts
+
+Current Phase 10 evidence status:
+
+- minimal AWS smoke passed against `gbn-conduit-full-dev` in `us-east-1`
+- smoke scope was intentionally small: one authority, one receiver, and one bridge with `DesiredBridgeCount=1`
+- all three ECS services reached `desired=1`, `running=1`, `pending=0`
+- full mobile-network bootstrap, punch, failover, churn, and explicit `chain_id` trace evidence remain pending
 
 ### 13.4 Validation Tests
 

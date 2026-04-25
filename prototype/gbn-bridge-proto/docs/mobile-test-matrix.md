@@ -17,6 +17,7 @@ GBN-PROTO-006 Phase 10 uses:
 
 | Scenario | Goal | Primary Command / Evidence | Acceptance Target | Current State |
 |---|---|---|---|---|
+| Minimal AWS full-stack smoke | deployed authority, receiver, and bridge services all reach steady state | `mobile-validation-full.sh --mode aws` plus ECS service counts and CloudWatch artifacts | all deployed services reach `desired=running`, stack remains `UPDATE_COMPLETE` | passed against `gbn-conduit-full-dev` with `DesiredBridgeCount=1`; full mobile path still pending |
 | App restart with cached catalog | creator reconnects after restart using signed cached state | `mobile-validation-full.sh --mode local` plus distributed e2e trace artifacts | reconnect and refresh without trust-root drift | local full implementation evidence available; live mobile run pending |
 | Stale bridge recovery | creator skips stale or downgraded bridges and still refreshes catalog | `mobile-validation-full.sh --mode local` plus reachability/e2e tests | stale entry does not block refresh success | local full implementation evidence available; live mobile run pending |
 | First-time bootstrap | new creator reaches Publisher through HostCreator path and establishes seed tunnel | `mobile-validation-full.sh --mode local` plus `tests/e2e/bootstrap.rs` | bootstrap completes and seed bridge becomes active | local full implementation evidence available; live AWS/mobile run pending |
@@ -49,6 +50,7 @@ These thresholds are the Phase 11 targets to measure against during live runs.
 ## Current Limitation
 
 The full implementation now has deployment binaries for authority, receiver,
-and exit bridge services. Live mobile-carrier behavior is still pending until a
-deployed `gbn-conduit-full-*` stack is exercised from a real mobile network path
-and its `chain_id` traces are collected.
+and exit bridge services. Minimal AWS smoke has passed for a one-bridge stack.
+Live mobile-carrier behavior is still pending until a deployed
+`gbn-conduit-full-*` stack is exercised from a real mobile network path and its
+explicit `chain_id` traces are collected.

@@ -1,6 +1,6 @@
 # GBN-PROTO-006 - Execution Phase 10 Detailed Plan: Live AWS And Mobile Validation
 
-**Status:** Implemented locally; live AWS/mobile evidence pending an active AWS stack and mobile-network run
+**Status:** Implemented locally; minimal AWS smoke evidence captured; live mobile-carrier evidence still pending
 **Primary Goal:** validate the full Conduit implementation on live AWS and mobile-network conditions, capture production-shaped bootstrap, fanout, forwarding, ACK, failover, and trace evidence, and produce a durable validation report suitable for the final decision gate  
 **Source Plan:** [GBN-PROTO-006 Execution Plan](GBN-PROTO-006-Conduit-Full-Implementation-Execution-Plan.md)  
 **Protected V1 Baseline:** [Veritas Lattice 0.1.0](https://github.com/fahdabidi/Veritas/releases/tag/veritas-lattice-0.1.0-baseline)  
@@ -76,9 +76,9 @@ Phase 10 should not begin code edits or live runs until all of these are checked
 
 If any gate fails, Phase 10 should stop.
 
-Current blocker:
+Remaining blocker:
 
-- live AWS/mobile evidence still requires an active AWS session, a deployed `gbn-conduit-full-*` stack, and a real mobile-network run
+- full mobile-carrier evidence still requires a real mobile-network run against the deployed `gbn-conduit-full-*` stack
 
 ---
 
@@ -291,11 +291,30 @@ git status --short
 
 Expected outcome:
 
-- live AWS/mobile evidence is captured
+- minimal AWS smoke evidence is captured
 - a full validation report exists
 - end-to-end `chain_id` evidence is preserved
 - protected V1 paths show no drift
 - extended V1 AWS regression remains green
+
+Minimal AWS smoke evidence captured during Phase 10:
+
+- Stack: `gbn-conduit-full-dev`
+- Region: `us-east-1`
+- Deployment scope: one authority service, one receiver service, one bridge service
+- Bridge count: `DesiredBridgeCount=1`
+- Image tag: `proto006-phase10-fix2`
+- Smoke status: authority, receiver, and bridge all reached `desired=1`, `running=1`, `pending=0`
+- Stack status after corrected deployment: `UPDATE_COMPLETE`
+- Validation artifact directory: `/tmp/veritas-proto006-phase10-aws-artifacts-fix2`
+- Trace run: `20260425T033558Z`
+- Trace counts: authority `57`, receiver `2`, bridge `192`
+- Validation summary run: `20260425T033521Z`
+- Smoke log: `/tmp/veritas-proto006-phase10-aws-artifacts-fix2/aws-smoke-20260425T033521Z.log`
+- Trace log: `/tmp/veritas-proto006-phase10-aws-artifacts-fix2/aws-trace-20260425T033521Z.log`
+
+This was intentionally a minimal AWS smoke test, not a full mobile-carrier or
+multi-bridge churn validation run.
 
 ---
 
@@ -321,7 +340,8 @@ Local implementation status:
 - full validation script exists
 - trace collector exists
 - local distributed validation mode is available
-- live AWS/mobile evidence remains pending until the operator runs the scripts against a deployed stack
+- minimal AWS smoke evidence has been captured against `gbn-conduit-full-dev`
+- full mobile-carrier evidence remains pending until the operator runs the scripts against a real mobile network path
 
 ---
 

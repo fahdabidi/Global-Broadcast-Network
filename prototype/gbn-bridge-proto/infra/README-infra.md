@@ -87,6 +87,7 @@ infra/scripts/deploy-conduit-full.sh \
   --region us-east-1 \
   --stack-name gbn-conduit-full-dev \
   --environment dev \
+  --desired-bridge-count 1 \
   --vpc-id vpc-REPLACE_ME \
   --service-subnet-ids subnet-REPLACE_ME_A,subnet-REPLACE_ME_B \
   --database-subnet-ids subnet-REPLACE_ME_C,subnet-REPLACE_ME_D \
@@ -140,6 +141,14 @@ Phase 10 full-validation evidence should be collected with:
 - `scripts/mobile-validation-full.sh`
 - `scripts/collect-conduit-traces.sh`
 - `docs/prototyping/Conduit/Full-Implementation-Plan/GBN-PROTO-006-Conduit-Full-Implementation-Test-Report.md`
+
+Phase 10 minimal AWS smoke validation was run with one bridge service. If the
+runtime image cannot validate the RDS CA chain in a development stack, the deploy
+script supports `--postgres-tls-accept-invalid-certs true` as a smoke-only escape
+hatch. Do not use that flag for production validation; pass the RDS CA bundle to
+the runtime through `GBN_BRIDGE_POSTGRES_TLS_CA_PEM` or
+`GBN_BRIDGE_POSTGRES_TLS_CA_FILE` and keep invalid certificate acceptance
+disabled.
 
 ## Current Prototype Boundary
 

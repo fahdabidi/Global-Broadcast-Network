@@ -72,6 +72,13 @@ Parameters:
     Default: 20
     MinValue: 20
     MaxValue: 100
+  PostgresTlsAcceptInvalidCerts:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Smoke-test escape hatch for private RDS TLS validation when no CA bundle is supplied.
   PublisherSigningKeySecretArn:
     Type: String
     Description: Secret ARN whose SecretString is the 64-character publisher signing key hex.
@@ -343,6 +350,10 @@ Resources:
               Value: !Ref DatabaseUsername
             - Name: GBN_BRIDGE_POSTGRES_SCHEMA
               Value: conduit_publisher
+            - Name: GBN_BRIDGE_POSTGRES_SSLMODE
+              Value: require
+            - Name: GBN_BRIDGE_POSTGRES_TLS_ACCEPT_INVALID_CERTS
+              Value: !Ref PostgresTlsAcceptInvalidCerts
             - Name: GBN_BRIDGE_PUBLISHER_SIGNING_MODE
               Value: hex
           Secrets:
@@ -447,8 +458,6 @@ Resources:
       TaskDefinition: !Ref AuthorityTaskDefinition
       ServiceRegistries:
         - RegistryArn: !GetAtt AuthorityDiscoveryService.Arn
-          ContainerName: publisher-authority
-          ContainerPort: !Ref AuthorityPort
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: !Ref AssignPublicIp
@@ -467,8 +476,6 @@ Resources:
       TaskDefinition: !Ref ReceiverTaskDefinition
       ServiceRegistries:
         - RegistryArn: !GetAtt ReceiverDiscoveryService.Arn
-          ContainerName: publisher-receiver
-          ContainerPort: !Ref ReceiverPort
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: !Ref AssignPublicIp

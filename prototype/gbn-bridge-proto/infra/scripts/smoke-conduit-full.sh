@@ -31,6 +31,10 @@ command -v aws >/dev/null 2>&1 || {
   echo "required command not found: aws" >&2
   exit 127
 }
+command -v python3 >/dev/null 2>&1 || {
+  echo "required command not found: python3" >&2
+  exit 127
+}
 
 STACK_JSON="$(aws cloudformation describe-stacks --region "$REGION" --stack-name "$STACK_NAME" --output json)"
 CLUSTER_NAME="$(printf '%s' "$STACK_JSON" | aws --region "$REGION" cloudformation describe-stacks --stack-name "$STACK_NAME" --query 'Stacks[0].Outputs[?OutputKey==`ClusterName`].OutputValue' --output text)"
@@ -44,12 +48,30 @@ AUTHORITY_LOG_GROUP="$(printf '%s' "$STACK_JSON" | aws --region "$REGION" cloudf
 RECEIVER_LOG_GROUP="$(printf '%s' "$STACK_JSON" | aws --region "$REGION" cloudformation describe-stacks --stack-name "$STACK_NAME" --query 'Stacks[0].Outputs[?OutputKey==`ReceiverLogGroup`].OutputValue' --output text)"
 BRIDGE_LOG_GROUP="$(printf '%s' "$STACK_JSON" | aws --region "$REGION" cloudformation describe-stacks --stack-name "$STACK_NAME" --query 'Stacks[0].Outputs[?OutputKey==`BridgeLogGroup`].OutputValue' --output text)"
 
+SERVICE_STATUS_JSON="$(aws ecs describe-services \
+  --region "$REGION" \
+  --cluster "$CLUSTER_NAME" \
+  --services "$AUTHORITY_SERVICE" "$RECEIVER_SERVICE" "$BRIDGE_SERVICE" \
+  --output json)"
+
 aws ecs describe-services \
   --region "$REGION" \
   --cluster "$CLUSTER_NAME" \
   --services "$AUTHORITY_SERVICE" "$RECEIVER_SERVICE" "$BRIDGE_SERVICE" \
   --query 'services[].{serviceName:serviceName,desired:desiredCount,running:runningCount,status:status}' \
   --output table
+
+UNHEALTHY_SERVICES="$(printf '%s' "$SERVICE_STATUS_JSON" | python3 -c 'import json,sys
+data=json.load(sys.stdin)
+for svc in data.get("services", []):
+    if svc.get("runningCount", 0) < svc.get("desiredCount", 0):
+        print("%s: desired=%s running=%s" % (svc.get("serviceName"), svc.get("desiredCount"), svc.get("runningCount")))')"
+
+if [[ -n "$UNHEALTHY_SERVICES" ]]; then
+  echo "one or more Conduit services are below desired running count:" >&2
+  printf '%s\n' "$UNHEALTHY_SERVICES" >&2
+  exit 1
+fi
 
 cat <<OUTPUTS
 AuthorityInternalUrl=$AUTHORITY_URL

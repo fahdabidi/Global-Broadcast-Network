@@ -15,6 +15,7 @@ DATABASE_NAME="${GBN_BRIDGE_DATABASE_NAME:-veritas_conduit}"
 DATABASE_USER="${GBN_BRIDGE_DATABASE_USER:-veritas}"
 DATABASE_INSTANCE_CLASS="${GBN_BRIDGE_DATABASE_INSTANCE_CLASS:-db.t3.micro}"
 DATABASE_ALLOCATED_STORAGE="${GBN_BRIDGE_DATABASE_ALLOCATED_STORAGE:-20}"
+POSTGRES_TLS_ACCEPT_INVALID_CERTS="${GBN_BRIDGE_POSTGRES_TLS_ACCEPT_INVALID_CERTS:-false}"
 AUTHORITY_INGRESS_CIDR="${GBN_BRIDGE_AUTHORITY_INGRESS_CIDR:-0.0.0.0/0}"
 
 usage() {
@@ -36,6 +37,7 @@ Options:
   --database-user NAME
   --database-instance-class CLASS
   --database-allocated-storage GB
+  --postgres-tls-accept-invalid-certs true|false
   --authority-ingress-cidr CIDR
 USAGE
 }
@@ -73,6 +75,7 @@ while [[ $# -gt 0 ]]; do
     --database-user) DATABASE_USER="$2"; shift 2 ;;
     --database-instance-class) DATABASE_INSTANCE_CLASS="$2"; shift 2 ;;
     --database-allocated-storage) DATABASE_ALLOCATED_STORAGE="$2"; shift 2 ;;
+    --postgres-tls-accept-invalid-certs) POSTGRES_TLS_ACCEPT_INVALID_CERTS="$2"; shift 2 ;;
     --authority-ingress-cidr) AUTHORITY_INGRESS_CIDR="$2"; shift 2 ;;
     --help|-h) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -116,6 +119,7 @@ aws cloudformation deploy \
     DatabaseUsername="$DATABASE_USER" \
     DatabaseInstanceClass="$DATABASE_INSTANCE_CLASS" \
     DatabaseAllocatedStorage="$DATABASE_ALLOCATED_STORAGE" \
+    PostgresTlsAcceptInvalidCerts="$POSTGRES_TLS_ACCEPT_INVALID_CERTS" \
     PublisherSigningKeySecretArn="$PUBLISHER_SIGNING_KEY_SECRET_ARN" \
     BridgeSigningSeedSecretArn="$BRIDGE_SIGNING_SEED_SECRET_ARN" \
     PublisherPublicKeyHex="$PUBLISHER_PUBLIC_KEY_HEX" \

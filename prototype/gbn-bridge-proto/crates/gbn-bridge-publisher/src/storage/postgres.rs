@@ -1,6 +1,7 @@
-use std::env;
+use std::{env, fs};
 
 use postgres::{Client, NoTls, Row, Transaction};
+use postgres_native_tls::MakeTlsConnector;
 use serde::de::DeserializeOwned;
 
 use crate::storage::recovery::{reconcile_recovered_state, RecoverySummary};
@@ -84,8 +85,7 @@ impl std::fmt::Debug for PostgresAuthorityStorage {
 impl PostgresAuthorityStorage {
     pub fn connect(config: &PostgresStorageConfig) -> StorageResult<Self> {
         let schema = SchemaName::parse(&config.schema)?;
-        let client = Client::connect(&config.connection_string, NoTls)
-            .map_err(|error| StorageError::Backend(error.to_string()))?;
+        let client = connect_postgres(&config.connection_string)?;
         let mut storage = Self { client, schema };
         storage.initialize_schema()?;
         Ok(storage)
@@ -591,6 +591,65 @@ impl PostgresAuthorityStorage {
 
         Ok(state)
     }
+}
+
+fn connect_postgres(connection_string: &str) -> StorageResult<Client> {
+    if postgres_connection_requires_tls(connection_string) {
+        let mut builder = native_tls::TlsConnector::builder();
+        if postgres_tls_accept_invalid_certs() {
+            builder.danger_accept_invalid_certs(true);
+        }
+        if let Some(certificate) = postgres_tls_root_certificate()? {
+            builder.add_root_certificate(certificate);
+        }
+        let connector = builder
+            .build()
+            .map_err(|error| StorageError::Backend(error.to_string()))?;
+        return Client::connect(connection_string, MakeTlsConnector::new(connector))
+            .map_err(|error| StorageError::Backend(format!("{error:?}")));
+    }
+
+    Client::connect(connection_string, NoTls)
+        .map_err(|error| StorageError::Backend(format!("{error:?}")))
+}
+
+fn postgres_connection_requires_tls(connection_string: &str) -> bool {
+    connection_string
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("sslmode="))
+        .map(|sslmode| {
+            matches!(
+                sslmode.to_ascii_lowercase().as_str(),
+                "require" | "verify-ca" | "verify-full"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn postgres_tls_accept_invalid_certs() -> bool {
+    env::var("GBN_BRIDGE_POSTGRES_TLS_ACCEPT_INVALID_CERTS")
+        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
+fn postgres_tls_root_certificate() -> StorageResult<Option<native_tls::Certificate>> {
+    if let Ok(pem) = env::var("GBN_BRIDGE_POSTGRES_TLS_CA_PEM") {
+        return native_tls::Certificate::from_pem(pem.as_bytes())
+            .map(Some)
+            .map_err(|error| StorageError::Config(error.to_string()));
+    }
+
+    let Ok(path) = env::var("GBN_BRIDGE_POSTGRES_TLS_CA_FILE") else {
+        return Ok(None);
+    };
+    let pem = fs::read(&path).map_err(|error| {
+        StorageError::Config(format!(
+            "failed to read postgres TLS CA file {path:?}: {error}"
+        ))
+    })?;
+    native_tls::Certificate::from_pem(&pem)
+        .map(Some)
+        .map_err(|error| StorageError::Config(error.to_string()))
 }
 
 fn persist_sequences(

@@ -366,7 +366,8 @@ fn load_ecs_task_metadata() -> io::Result<EcsTaskMetadata> {
     let mut response = Vec::new();
     stream.read_to_end(&mut response)?;
     let body = extract_http_body(&response)?;
-    serde_json::from_slice(body).map_err(|error| {
+    let body = decode_chunked_body(body).unwrap_or_else(|| body.to_vec());
+    serde_json::from_slice(&body).map_err(|error| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("invalid ECS task metadata payload: {error}"),
@@ -391,15 +392,16 @@ fn parse_http_endpoint(url: &str) -> io::Result<ParsedHttpEndpoint> {
         .next()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing host"))?;
     let path = format!("/{}", split.next().unwrap_or_default());
-    let mut parts = authority.rsplitn(2, ':');
-    let port = parts
-        .next()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing port"))?
-        .parse::<u16>()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid port"))?;
-    let host = parts
-        .next()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing host"))?;
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() => {
+            let port = port
+                .parse::<u16>()
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid port"))?;
+            (host, port)
+        }
+        _ if !authority.is_empty() => (authority, 80),
+        _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "missing host")),
+    };
 
     Ok(ParsedHttpEndpoint {
         host: host.to_string(),
@@ -416,6 +418,32 @@ fn extract_http_body(response: &[u8]) -> io::Result<&[u8]> {
             io::Error::new(io::ErrorKind::InvalidData, "missing http header terminator")
         })?;
     Ok(&response[header_end + 4..])
+}
+
+fn decode_chunked_body(body: &[u8]) -> Option<Vec<u8>> {
+    let mut cursor = 0;
+    let mut decoded = Vec::new();
+
+    loop {
+        let line_end = body[cursor..]
+            .windows(2)
+            .position(|window| window == b"\r\n")?
+            + cursor;
+        let size_line = std::str::from_utf8(&body[cursor..line_end]).ok()?;
+        let size_hex = size_line.split(';').next()?.trim();
+        let size = usize::from_str_radix(size_hex, 16).ok()?;
+        cursor = line_end + 2;
+
+        if size == 0 {
+            return Some(decoded);
+        }
+        if body.len() < cursor + size + 2 || &body[cursor + size..cursor + size + 2] != b"\r\n" {
+            return None;
+        }
+
+        decoded.extend_from_slice(&body[cursor..cursor + size]);
+        cursor += size + 2;
+    }
 }
 
 fn resolve_endpoint(host: &str, port: u16) -> io::Result<SocketAddr> {
@@ -484,6 +512,37 @@ fn parse_env_u64(key: &str, default: u64) -> Result<u64, String> {
             .parse::<u64>()
             .map_err(|_| format!("{key} must be a valid u64, got {value:?}")),
         Err(_) => Ok(default),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_chunked_body;
+    use super::parse_http_endpoint;
+
+    #[test]
+    fn ecs_metadata_endpoint_without_port_uses_http_default_port() {
+        let endpoint = parse_http_endpoint("http://169.254.170.2/v4/task").unwrap();
+
+        assert_eq!(endpoint.host, "169.254.170.2");
+        assert_eq!(endpoint.port, 80);
+        assert_eq!(endpoint.path, "/v4/task");
+    }
+
+    #[test]
+    fn endpoint_with_explicit_port_keeps_that_port() {
+        let endpoint = parse_http_endpoint("http://publisher-authority:8080/health").unwrap();
+
+        assert_eq!(endpoint.host, "publisher-authority");
+        assert_eq!(endpoint.port, 8080);
+        assert_eq!(endpoint.path, "/health");
+    }
+
+    #[test]
+    fn chunked_metadata_body_is_decoded_before_json_parsing() {
+        let body = b"9\r\n{\"ok\":tru\r\n2\r\ne}\r\n0\r\n\r\n";
+
+        assert_eq!(decode_chunked_body(body).unwrap(), br#"{"ok":true}"#);
     }
 }
 
